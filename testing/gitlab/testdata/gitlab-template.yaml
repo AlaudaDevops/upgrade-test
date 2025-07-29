@@ -1,0 +1,228 @@
+apiVersion: operator.alaudadevops.io/v1alpha1
+kind: GitlabOfficial
+metadata:
+  annotations:
+    operator.alaudadevops.io/managed-by: gitlab-ce-operator
+  name: {{ name }}
+spec:
+  externalURL: http://{{ node_ip }}:{{ gitlab_port }}
+  helmValues:
+    gitlab:
+      gitaly:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/gitaly
+        init:
+          resources:
+            limits:
+              cpu: 700m
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+        resources:
+          limits:
+            cpu: 2
+            memory: 2Gi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+      gitlab-shell:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/gitlab-shell
+        init:
+          resources:
+            limits:
+              cpu: 250m
+              memory: 600Mi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+        resources:
+          limits:
+            cpu: 1
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        service:
+          nodePort: {{ ssh_port }}
+          type: NodePort
+      migrations:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/gitlab-toolbox-ce
+        init:
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+      praefect:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/gitaly
+      sidekiq:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/gitlab-sidekiq-ce
+        init:
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+        resources:
+          limits:
+            cpu: 2
+            memory: 2Gi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+      toolbox:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/gitlab-toolbox-ce
+      webservice:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/gitlab-webservice-ce
+        ingress:
+          enabled: false
+        init:
+          resources:
+            limits:
+              cpu: 2
+              memory: 4Gi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+        resources:
+          limits:
+            cpu: 2
+            memory: 4Gi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        workhorse:
+          image: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/gitlab-workhorse-ce
+          resources:
+            limits:
+              cpu: 1
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+    global:
+      appConfig:
+        gitlabPort: {{ gitlab_port }}
+        object_store:
+          enabled: true
+      certificates:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/certificates
+      gitlabBase:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/gitlab-base
+      gitlabNodePort:
+        http: {{ gitlab_port }}
+        ssh: {{ ssh_port }}
+      hostpath:
+        enabled: true
+        nodeName: {{ node_name }}
+        path: {{ hostpath_path }}
+      hosts:
+        domain: {{ node_ip }}
+        gitlab:
+          https: false
+          name: {{ node_ip }}
+        ssh: {{ node_ip }}
+      imageRegistry: 152-231-registry.alauda.cn:60070
+      ingress:
+        class: ""
+        configureCertmanager: false
+        enabled: false
+      initialRootPassword:
+        key: password
+        secret: {{ gitlab_root_password_secret_name }}
+      ipStack: IPv4
+      kubectl:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/kubectl
+      nodeSelector:
+        kubernetes.io/hostname: {{ node_name }}
+      shell:
+        port: {{ ssh_port }}
+      uploads:
+        persistence:
+          enabled: true
+    postgresql:
+      image:
+        repository: 3rdparty/bitnami/postgresql
+        tag: 14.8.0-debian-11-r84
+      install: true
+      metrics:
+        enabled: false
+      primary:
+        persistence:
+          enabled: true
+          storageClass: {{ storage_class }}
+      replicas: 1
+      resources:
+        limits:
+          cpu: 1
+          memory: 1Gi
+        requests:
+          cpu: 100m
+          memory: 100Mi
+      volumePermissions:
+        enabled: true
+        image:
+          repository: 3rdparty/bitnami/bitnami-shell
+          tag: 11-debian-11-r119
+    redis:
+      image:
+        repository: 3rdparty/bitnami/redis
+        tag: 7.0.15-debian-12-r13
+      install: true
+      master:
+        configuration: |
+          ignore-warnings ARM64-COW-BUG
+        persistence:
+          enabled: true
+          storageClass: {{ storage_class }}
+        resources:
+          limits:
+            cpu: 500m
+            memory: 500Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+      metrics:
+        enabled: false
+      persistence:
+        enabled: true
+        storageClass: {{ storage_class }}
+      replicas: 1
+      resources:
+        limits:
+          cpu: 500m
+          memory: 500Mi
+        requests:
+          cpu: 100m
+          memory: 100Mi
+      volumePermissions:
+        enabled: true
+        image:
+          repository: 3rdparty/bitnami/bitnami-shell
+          tag: 11-debian-11-r119
+        resources:
+          limits:
+            cpu: 500m
+            memory: 500Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+    shared-secrets:
+      selfsign:
+        image:
+          repository: 152-231-registry.alauda.cn:60070/devops/gitlab-org/build/cng/cfssl-self-sign
