@@ -1,4 +1,4 @@
-module github.com/AlaudaDevops/tools-upgrade-test
+module github.com/AlaudaDevops/upgrade-test
 
 go 1.24.0
 

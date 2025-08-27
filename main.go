@@ -2,7 +2,7 @@
 
 package main
 
-import "github.com/AlaudaDevops/tools-upgrade-test/cmd"
+import "github.com/AlaudaDevops/upgrade-test/cmd"
 
 func main() {
 	cmd.Execute()

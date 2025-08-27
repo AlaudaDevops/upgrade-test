@@ -3,9 +3,9 @@ package operator
 import (
 	"k8s.io/client-go/rest"
 
-	"github.com/AlaudaDevops/tools-upgrade-test/pkg/config"
-	"github.com/AlaudaDevops/tools-upgrade-test/pkg/operator/local"
-	"github.com/AlaudaDevops/tools-upgrade-test/pkg/operator/operatorhub"
+	"github.com/AlaudaDevops/upgrade-test/pkg/config"
+	"github.com/AlaudaDevops/upgrade-test/pkg/operator/local"
+	"github.com/AlaudaDevops/upgrade-test/pkg/operator/operatorhub"
 )
 
 // OperatorType represents the type of operator implementation

@@ -12,9 +12,9 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/AlaudaDevops/tools-upgrade-test/pkg/config"
-	"github.com/AlaudaDevops/tools-upgrade-test/pkg/exec"
-	"github.com/AlaudaDevops/tools-upgrade-test/pkg/operator"
+	"github.com/AlaudaDevops/upgrade-test/pkg/config"
+	"github.com/AlaudaDevops/upgrade-test/pkg/exec"
+	"github.com/AlaudaDevops/upgrade-test/pkg/operator"
 	"knative.dev/pkg/logging"
 )
 

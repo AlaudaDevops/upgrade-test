@@ -57,7 +57,7 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.title="Tools Upgrade Test" \
       org.opencontainers.image.description="A tool for testing operator upgrades" \
-      org.opencontainers.image.source="https://github.com/AlaudaDevops/tools-upgrade-test"
+      org.opencontainers.image.source="https://github.com/AlaudaDevops/upgrade-test"
 
 # Expose port (if needed)
 # EXPOSE 8080

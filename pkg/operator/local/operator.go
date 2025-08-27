@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/AlaudaDevops/tools-upgrade-test/pkg/exec"
+	"github.com/AlaudaDevops/upgrade-test/pkg/exec"
 	"knative.dev/pkg/logging"
 )
 
