@@ -16,11 +16,14 @@ const (
 // Config represents the main configuration structure
 type Config struct {
 	UpgradePaths []UpgradePath `yaml:"upgradePaths,omitempty"`
-	LogLevel     string        `yaml:"logLevel,omitempty"`
+	Immediate    bool          `yaml:"immediate,omitempty"`
 	Workspace    string        `yaml:"workspace,omitempty"`
-	Cleanup      bool          `yaml:"cleanup,omitempty"`
-	Git          GitConfig     `yaml:"git,omitempty"`
-	Operator     Operator      `yaml:"operator,omitempty"`
+	LogLevel     string        `yaml:"logLevel,omitempty"`
+	Artifact     string        `yaml:"artifact,omitempty"`
+
+	PrepareCommand    string `yaml:"prepareCommand,omitempty"`
+	OperatorNamespace string `yaml:"operatorNamespace,omitempty"`
+	OperatorName      string `yaml:"operatorName,omitempty"`
 }
 
 // Operator represents the operator configuration
@@ -33,14 +36,6 @@ type Operator struct {
 	ArtifactName      string `yaml:"artifactName,omitempty"`
 }
 
-// GitConfig represents git-specific configuration
-type GitConfig struct {
-	Revision   string `yaml:"revision,omitempty"`
-	Username   string `yaml:"username,omitempty"`
-	Password   string `yaml:"password,omitempty"`
-	Repository string `yaml:"repository,omitempty"`
-}
-
 // UpgradePath represents a single upgrade path
 type UpgradePath struct {
 	Name     string    `yaml:"name,omitempty"`
@@ -49,12 +44,12 @@ type UpgradePath struct {
 
 // Version represents a single version in the upgrade path
 type Version struct {
-	Name         string    `yaml:"name,omitempty"`
-	BundleImage  string    `yaml:"bundleImage,omitempty"`
-	TestCommand  string    `yaml:"testCommand,omitempty"`
-	BuildCommand string    `yaml:"buildCommand,omitempty"`
-	TestSubPath  string    `yaml:"testSubPath,omitempty"`
-	Git          GitConfig `yaml:"git,omitempty"`
+	Name          string `yaml:"name,omitempty"`
+	BundleVersion string `yaml:"bundleVersion,omitempty"`
+	TestCommand   string `yaml:"testCommand,omitempty"`
+	TestSubPath   string `yaml:"testSubPath,omitempty"`
+	BuildCommand  string `yaml:"buildCommand,omitempty"`
+	Revision      string `yaml:"revision,omitempty"`
 }
 
 // LoadConfig loads the configuration from a YAML file
@@ -74,20 +69,20 @@ func LoadConfig(path string) (*Config, error) {
 
 func defaultConfig(config *Config) *Config {
 	if config.Workspace == "" {
-		config.Workspace = "/tmp/upgrade-test"
+		config.Workspace = "./"
 	}
 
-	if config.Operator.MaxRetries == 0 {
-		config.Operator.MaxRetries = 60
-	}
+	// if config.Operator.MaxRetries == 0 {
+	// 	config.Operator.MaxRetries = 60
+	// }
 
-	if config.Operator.OperatorNamespace == "" {
-		config.Operator.OperatorNamespace = defaultOperatorNamespace
-	}
+	// if config.Operator.OperatorNamespace == "" {
+	// 	config.Operator.OperatorNamespace = defaultOperatorNamespace
+	// }
 
-	if config.Operator.SystemNamespace == "" {
-		config.Operator.SystemNamespace = defaultSystemNamespace
-	}
+	// if config.Operator.SystemNamespace == "" {
+	// 	config.Operator.SystemNamespace = defaultSystemNamespace
+	// }
 
 	return config
 }

@@ -8,16 +8,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/AlaudaDevops/tools-upgrade-test/pkg/exec"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/AlaudaDevops/tools-upgrade-test/pkg/config"
 	upctx "github.com/AlaudaDevops/tools-upgrade-test/pkg/context"
-	"github.com/AlaudaDevops/tools-upgrade-test/pkg/git"
+	"github.com/AlaudaDevops/tools-upgrade-test/pkg/exec"
 	"github.com/AlaudaDevops/tools-upgrade-test/pkg/operator"
 )
 
@@ -101,10 +101,7 @@ func runUpgrade() error {
 	defer logger.Sync()
 
 	// Create context with logger
-	ctx := upctx.WithOperatorNamespace(context.Background(), cfg.Operator.OperatorNamespace)
-	ctx = upctx.WithSystemNamespace(ctx, cfg.Operator.SystemNamespace)
-	ctx = upctx.WithMaxRetries(ctx, cfg.Operator.MaxRetries)
-	ctx = upctx.WithLogger(ctx, logger.Sugar())
+	ctx := upctx.WithLogger(context.Background(), logger.Sugar())
 
 	// Load kubernetes configuration
 	k8sConfig, err := loadKubeConfig(kubeconfig)
@@ -113,14 +110,18 @@ func runUpgrade() error {
 	}
 
 	// Create operator manager
-	op, err := operator.NewOperator(k8sConfig)
+	op, err := operator.NewOperator(k8sConfig, cfg.OperatorNamespace, cfg.OperatorName)
 	if err != nil {
 		return fmt.Errorf("failed to create operator manager: %v", err)
 	}
 
 	for _, path := range cfg.UpgradePaths {
 		if err := processUpgrade(ctx, op, path, cfg); err != nil {
-			return fmt.Errorf("failed to process upgrade path: %v", err)
+			if !cfg.Immediate {
+				logger.Error("failed to process upgrade path", zap.String("path", path.Name), zap.Error(err))
+				continue
+			}
+			return fmt.Errorf("failed to process upgrade path: %s, error: %v", path.Name, err)
 		}
 	}
 
@@ -130,54 +131,39 @@ func runUpgrade() error {
 
 func processUpgrade(ctx context.Context, op *operator.Operator, path config.UpgradePath, cfg *config.Config) error {
 	logger := upctx.LoggerFromContext(ctx)
-	logger = logger.Named(path.Name)
-	ctx = upctx.WithLogger(ctx, logger)
+	logger.Infow("==> processing upgrade path", "path", path.Name)
+	for index, version := range path.Versions {
+		logger.Infow("deploying operator version", "version", version.Name)
+		av, err := op.InstallArtifactVersion(ctx, version.BundleVersion)
+		if err != nil {
+			return fmt.Errorf("failed to prepare operator: %v", err)
+		}
 
-	// Create git manager
-	gitManager, err := git.NewGitManager(
-		filepath.Join(cfg.Workspace, path.Name),
-		cfg.Git.Repository,
-		cfg.Git.Username,
-		cfg.Git.Password,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create git manager: %v", err)
+		csv, _, _ := unstructured.NestedString(av.Object, "status", "version")
+		if err := op.InstallSubscription(ctx, csv); err != nil {
+			return fmt.Errorf("failed to install subscription: %v", err)
+		}
+
+		testCommand := "make upgrade"
+		if index == 0 {
+			testCommand = "make prepare"
+		}
+		if version.TestCommand != "" {
+			testCommand = version.TestCommand
+		}
+
+		if err := execCommand(ctx, cfg.Workspace, fmt.Sprintf("git checkout %s", version.Revision)); err != nil {
+			return fmt.Errorf("failed to checkout revision %s: %v", version.Revision, err)
+		}
+
+		if err := execCommand(ctx,
+			fmt.Sprintf("%s/%s", cfg.Workspace, version.TestSubPath),
+			fmt.Sprintf("%s && %s", cfg.PrepareCommand, testCommand)); err != nil {
+			return fmt.Errorf("failed to execute test command: %v", err)
+		}
+		logger.Info("upgrade test passed", "version", version.Name)
 	}
-
-	for _, version := range path.Versions {
-		var cloneDir string
-		var err error
-		if cfg.Git.Repository != "" && version.Git.Revision != "" && version.BuildCommand != "" {
-			// Clone and build from git
-			cloneDir, err = gitManager.Clone(ctx, version.Name, &version.Git)
-			if err != nil {
-				return fmt.Errorf("failed to process git version: %v", err)
-			}
-		}
-
-		if version.BuildCommand != "" {
-			// Build operator
-			err := gitManager.Build(ctx, cloneDir, version.BuildCommand)
-			if err != nil {
-				return fmt.Errorf("failed to build operator: %v", err)
-			}
-		}
-
-		// Deploy operator
-		if err := deployOperator(ctx, op, cfg.Operator.ArtifactName, version); err != nil {
-			return fmt.Errorf("failed to deploy operator: %v", err)
-		}
-
-		// Execute upgrade test
-		if err := execUpgradeTest(ctx, filepath.Join(cloneDir, version.TestSubPath), version.TestCommand); err != nil {
-			return fmt.Errorf("failed to execute upgrade test: %v", err)
-		}
-
-		// Cleanup
-		if cfg.Cleanup {
-			defer gitManager.Cleanup(cloneDir)
-		}
-	}
+	logger.Infow("==> upgrade path completed", "path", path.Name)
 
 	return nil
 }
@@ -189,23 +175,14 @@ func loadKubeConfig(kubeconfig string) (*rest.Config, error) {
 	return rest.InClusterConfig()
 }
 
-func deployOperator(ctx context.Context, op *operator.Operator, artifactName string, version config.Version) error {
-	operatorName, startCSVName, err := op.PrepareOperator(ctx, artifactName, version)
-	if err != nil {
-		return fmt.Errorf("failed to prepare operator: %v", err)
-	}
-
-	return op.InstallOperator(ctx, operatorName, startCSVName)
-}
-
-func execUpgradeTest(ctx context.Context, workDir, command string) error {
+func execCommand(ctx context.Context, workDir, command string) error {
 	logger := upctx.LoggerFromContext(ctx)
 	logger.Infow("executing upgrade test", "command", command)
 
 	result := exec.RunCommand(ctx, exec.Command{
 		Name: "bash",
 		Args: []string{"-c", command},
-		Dir:  "testing/gitlab",
+		Dir:  workDir,
 	})
 
 	if result.Err != nil {

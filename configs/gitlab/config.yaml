@@ -1,48 +1,18 @@
-
-workspace: /tmp/upgrade-test
-git:
-  gitUsername: "kycheng"
-  gitPassword: "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x"
-  repository: https://github.com/AlaudaDevops/gitlab-ce-operator.git
-  cleanup: false
-operator:
-  artifactName: test-upgrade-gitlab-operator
-  operatorNamespace: testing-upgrade-namespace
-  systemNamespace: cpaas-system
-  channel: stable
-  cleanup: true
-  maxRetries: 600
-
+workspace: /Users/mac/Desktop/kychen/alaudadevops/gitlab-operator
+operatorNamespace: gitlab-ce-operator
+operatorName: gitlab-ce-operator
+prepareCommand: export REPORT=allure
 upgradePaths: # 定义升级路径，可以包含多个
    - name: v17.8 upgrade to v17.11 # 升级名称
      versions: # 定义升级路经
        - name: v17.8 # 版本名称
-         testCommand: |
-            pip install -r requirements.txt
-            export EXTRA_ARGS="--alluredir=v17.8"
-            make create
-        #  buildCommand: |
-        #     git submodule update --init --recursive
-        #     export BUNDLE_VERSION=17.8.5
-        #     make push_bundle_image
-        #     make push_tool_image
+         testCommand: make prepare
          testSubPath: testing
-         bundleImage: 152-231-registry.alauda.cn:60070/test/gitlab-ce-operator-bundle:17.8.5
-        #  git: # 定义 runType 为 Git 时所需参数
-        #     revision: feat/release-17.8-test # 用于 clone 代码，可以是分支，tag，和commit
+         bundleVersion: v17.8.10
+         revision: feat/upgrade-case-17.8
        - name: v17.11 # 版本名称
-         testCommand: |
-            pip install -r requirements.txt
-            export UPGRADE_VERSION=17.11.4
-            export EXTRA_ARGS="--alluredir=v17.11"
-            make upgrade
-         buildCommand: |
-            git submodule update --init --recursive
-            export BUNDLE_VERSION=17.11.4
-            make push_bundle_image
-            make push_tool_image
+         testCommand: make upgrade
          testSubPath: testing
-         bundleImage: 152-231-registry.alauda.cn:60070/test/gitlab-ce-operator-bundle:17.11.4
-         git: # 定义 runType 为 Git 时所需参数
-            revision: release-17.11 # 用于 clone 代码，可以是分支，tag，和commit
+         bundleVersion: v17.11.1
+         revision: feat/upgrade-case-17.11
 

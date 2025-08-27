@@ -11,7 +11,7 @@
             "request": "launch",
             "mode": "auto",
             "program": "${fileDirname}",
-            "args": ["upgrade"]
+            "args": ["upgrade", "--config", "configs/gitlab/config.yaml"]
         }
     ]
 }

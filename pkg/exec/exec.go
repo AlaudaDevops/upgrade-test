@@ -6,9 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-
-	upctx "github.com/AlaudaDevops/tools-upgrade-test/pkg/context"
-	"go.uber.org/zap"
 )
 
 type Command struct {
@@ -43,9 +40,6 @@ func (c *Command) WithEnv(env []string) CommandOption {
 // If the command fails, it will return the error along with the captured output
 // The command's output will be printed to console in real-time while also being captured
 func RunCommand(ctx context.Context, cmd Command) CommandResult {
-	logger := upctx.LoggerFromContext(ctx)
-
-	logger.Info("Running command", zap.String("name", cmd.Name), zap.Strings("args", cmd.Args))
 	runCmd := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
 	runCmd.Dir = cmd.Dir
 
