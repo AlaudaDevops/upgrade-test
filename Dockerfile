@@ -43,7 +43,7 @@ RUN addgroup -g 1001 -S appgroup && \
 WORKDIR /app
 
 # Copy binary from builder stage
-COPY --from=builder /app/main .
+COPY --from=builder /app/upgrade .
 
 # Change ownership to non-root user
 RUN chown -R appuser:appgroup /app
