@@ -22,7 +22,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o upgrade ./main.go
 
 # Final stage
 FROM alpine:latest
@@ -63,4 +63,4 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}" \
 # EXPOSE 8080
 
 # Run the application
-CMD ["./main"]
+CMD ["./upgrade"]
