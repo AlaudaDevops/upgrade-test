@@ -1,7 +1,8 @@
-package operator
+package operatorhub
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -84,4 +85,20 @@ func NewOperator(config *rest.Config, namespace, name string) (*Operator, error)
 
 func (o *Operator) GetResource(ctx context.Context, name, namespace string, gvr schema.GroupVersionResource) (*unstructured.Unstructured, error) {
 	return o.client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (o *Operator) UpgradeOperator(ctx context.Context, version string) error {
+	// Install artifact version
+	av, err := o.InstallArtifactVersion(ctx, version)
+	if err != nil {
+		return fmt.Errorf("failed to prepare operator: %v", err)
+	}
+
+	// Get CSV version from artifact version
+	csv, _, _ := unstructured.NestedString(av.Object, "status", "version")
+	if err := o.InstallSubscription(ctx, csv); err != nil {
+		return fmt.Errorf("failed to install subscription: %v", err)
+	}
+
+	return nil
 }

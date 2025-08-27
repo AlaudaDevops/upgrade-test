@@ -1,17 +1,26 @@
-workspace: /Users/mac/Desktop/kychen/alaudadevops/gitlab-operator
-operatorNamespace: gitlab-ce-operator
-operatorName: gitlab-ce-operator
-prepareCommand: export REPORT=allure
+
+operatorConfig:
+  workspace: /Users/mac/Desktop/kychen/alaudadevops/gitlab-operator
+  namespace: gitlab-ce-operator
+  name: gitlab-ce-operator
+  command: |
+    make certmanager
+    make deploy
+
 upgradePaths: # 定义升级路径，可以包含多个
    - name: v17.8 upgrade to v17.11 # 升级名称
      versions: # 定义升级路经
        - name: v17.8 # 版本名称
-         testCommand: make prepare
+         testCommand: |
+           export REPORT=allure
+           make prepare
          testSubPath: testing
          bundleVersion: v17.8.10
          revision: feat/upgrade-case-17.8
        - name: v17.11 # 版本名称
-         testCommand: make upgrade
+         testCommand: |
+           export REPORT=allure
+           make upgrade
          testSubPath: testing
          bundleVersion: v17.11.1
          revision: feat/upgrade-case-17.11

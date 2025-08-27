@@ -1,16 +1,16 @@
-package operator
+package operatorhub
 
 import (
 	"context"
 	"fmt"
 	"time"
 
-	upctx "github.com/AlaudaDevops/tools-upgrade-test/pkg/context"
 	"github.com/oliveagle/jsonpath"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"knative.dev/pkg/logging"
 )
 
 func (o *Operator) InstallSubscription(ctx context.Context, csv string) error {
@@ -18,7 +18,7 @@ func (o *Operator) InstallSubscription(ctx context.Context, csv string) error {
 		return fmt.Errorf("csv is empty")
 	}
 
-	log := upctx.LoggerFromContext(ctx)
+	log := logging.FromContext(ctx)
 	log.Infow("installing subscription", "csv", csv, "namespace", o.namespace)
 	// Delete the subscription and csv if they exist
 	if err := o.client.Resource(subscriptionGVR).Namespace(o.namespace).Delete(ctx, o.name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {

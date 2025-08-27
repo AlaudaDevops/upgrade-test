@@ -1,19 +1,19 @@
-package operator
+package operatorhub
 
 import (
 	"context"
 	"fmt"
 	"strings"
 
-	upctx "github.com/AlaudaDevops/tools-upgrade-test/pkg/context"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"knative.dev/pkg/logging"
 )
 
 func (o *Operator) InstallArtifactVersion(ctx context.Context, version string) (*unstructured.Unstructured, error) {
-	log := upctx.LoggerFromContext(ctx)
+	log := logging.FromContext(ctx)
 	log.Infow("installing artifact version", "version", version)
 
 	artifact, err := o.GetResource(ctx, fmt.Sprintf("operatorhub-%s", o.name), systemNamespace, artifactGVR)
