@@ -23,6 +23,7 @@ type UpgradeCommand struct {
 	configFile string
 	kubeconfig string
 	logLevel   string
+	workspace  string
 	logger     *zap.Logger
 	config     *config.Config
 	operator   operator.OperatorInterface
@@ -66,6 +67,7 @@ func (uc *UpgradeCommand) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&uc.configFile, "config", "config.yaml", "path to configuration file")
 	cmd.Flags().StringVar(&uc.kubeconfig, "kubeconfig", "", "path to kubeconfig file, if not set, get KUBECONFIG from env, or ~/.kube/config")
 	cmd.Flags().StringVar(&uc.logLevel, "log-level", "info", "log level (debug, info, warn, error)")
+	cmd.Flags().StringVar(&uc.workspace, "workspace", "", "workspace for the operator")
 }
 
 // Execute runs the upgrade command
@@ -78,6 +80,10 @@ func (uc *UpgradeCommand) Execute() error {
 		return fmt.Errorf("failed to load config: %v", err)
 	}
 	uc.config = cfg
+
+	if uc.workspace != "" {
+		cfg.OperatorConfig.Workspace = uc.workspace
+	}
 
 	// Create logger with configured level
 	logger, err := uc.newLogger(cfg.LogLevel)
@@ -194,7 +200,7 @@ func (uc *UpgradeCommand) process(ctx context.Context, path config.UpgradePath) 
 		}
 
 		// Checkout git revision
-		if err := uc.execCommand(ctx, uc.config.OperatorConfig.Workspace, fmt.Sprintf("git checkout %s", version.Revision)); err != nil {
+		if err := uc.execCommand(ctx, uc.workspace, fmt.Sprintf("git checkout %s", version.Revision)); err != nil {
 			return fmt.Errorf("failed to checkout revision %s: %v", version.Revision, err)
 		}
 
