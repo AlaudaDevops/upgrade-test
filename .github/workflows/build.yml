@@ -49,6 +49,9 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
 
+      - name: Create dist directory
+        run: mkdir -p dist
+
       - name: Build binary
         env:
           GOOS: linux
@@ -62,6 +65,9 @@ jobs:
           
           # Create checksum file
           shasum -a 256 "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}" > "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}.sha256"
+          
+          # List files for debugging
+          ls -la dist/
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -85,6 +91,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist/
+
+      - name: List downloaded artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          find dist/ -type f -exec ls -la {} \;
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
