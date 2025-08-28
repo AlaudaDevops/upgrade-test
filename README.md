@@ -1,4 +1,4 @@
-# Tool Upgrade Tester
+# Upgrade Tester
 
 ## 测试目标
 
@@ -7,13 +7,17 @@
 ## 功能要求
 
 1. 升级测试包含： 创建对应版本 operator，部署对应版本实例，准备测试数据，验证测试数据，功能验证
-~2. 升级测试中断后可恢复执行~
 2. 可以自定义升级路基。如存在 4 个版本 gitlab v1.1.0,v1.1.2,v1.2.0,v2.0.0.  升级路径可以是：v1.1.0 -> v2.0.0, v1.1.2 -> v2.0.0, v1.2.0 -> v2.0.0, v1.1.2 -> v1.2.0 -> v2.0.0
 3. 支持在不同版本运行不同的测试用例集验证升级。
 
 ## 程序处理流程
 
 1. 启动时读取配置文件 config.yaml，确定升级流程
+2. 上架 artifactVersion
+3. 安装 operator
+4. 运行测试，再到 步骤2 升级到新版本 operator
+
+## 配置文件
 
 ```yaml
 operatorConfig:
@@ -36,14 +40,11 @@ upgradePaths: # 定义升级路径，可以包含多个
            # git checkout feat/upgrade-case-17.11
            # export REPORT=allure
            # make upgrade
+           gitlab17.8.test --godog.concurrency=1 --godog.format=allure --godog.tags=@prepare --bdd.cleanup=false
            gitlab17.11.test --godog.concurrency=1 --godog.format=allure --godog.tags=@upgrade --bdd.cleanup=false
         #  testSubPath: v17.11.1
          bundleVersion: v17.11.1 # bundle 版本号
 ```
-
-2. 上架 artifactVersion
-3. 安装 operator
-4. 运行测试
 
 ## 测试用例的编写
 
@@ -98,9 +99,9 @@ upgradePaths: # 定义升级路径，可以包含多个
 │   └── upgrade # 升级测试工具
 ├── /app/testing
 │   └── v17.8
-│     └──── ... # 测试所需文件
+│     └──── allure-results... # 测试所需文件
 │   └── v17.11
-│     └──── ... # 测试所需文件
+│     └──── allure-results... # 测试所需文件
 │   └── config.yaml # 测试执行的 yaml 配置
 ```
 
@@ -117,10 +118,12 @@ upgradePaths: # 定义升级路径，可以包含多个
        - name: v17.8 # 版本名称
          testCommand: | # 执行测试指令
           gitlab17.8.test --godog.concurrency=1 --godog.format=allure --godog.tags=@prepare --bdd.cleanup=false
+          mv test_dump common
          testSubPath: v17.8
          bundleVersion: v17.8.10 # bundle 版本号
        - name: v17.11 # 版本名称
          testCommand: |
+           
            gitlab17.11.test --godog.concurrency=1 --godog.format=allure --godog.tags=@upgrade --bdd.cleanup=false
          testSubPath: v17.11
          bundleVersion: v17.11.1 # bundle 版本号
