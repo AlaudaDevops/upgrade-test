@@ -7,18 +7,11 @@ upgradePaths: # 定义升级路径，可以包含多个
      versions: # 定义升级路经
        - name: v17.8 # 版本名称
          testCommand: |
-          git checkout feat/upgrade-case-17.8
           export REPORT=allure
-          make prepare
-          # gitlab17.8.test --godog.concurrency=1 --godog.format=allure --godog.tags=@prepare --bdd.cleanup=false
-        #  testSubPath: v17.8.10
+          TAGS=@prepare-17.8 make test
          bundleVersion: v17.8.10
        - name: v17.11 # 版本名称
          testCommand: |
-           git checkout feat/upgrade-case-17.11
-           export REPORT=allure
-           make upgrade
-          #  gitlab17.11.test --godog.concurrency=1 --godog.format=allure --godog.tags=@upgrade --bdd.cleanup=false
-        #  testSubPath: v17.11.1
+          TAGS=@upgrade-17.11 GODOG_ARGS="--godog.format=allure --bdd.cleanup=false" make test
          bundleVersion: v17.11.1
 

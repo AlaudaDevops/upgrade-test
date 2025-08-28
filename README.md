@@ -40,7 +40,6 @@ upgradePaths: # 定义升级路径，可以包含多个
            # git checkout feat/upgrade-case-17.11
            # export REPORT=allure
            # make upgrade
-           gitlab17.8.test --godog.concurrency=1 --godog.format=allure --godog.tags=@prepare --bdd.cleanup=false
            gitlab17.11.test --godog.concurrency=1 --godog.format=allure --godog.tags=@upgrade --bdd.cleanup=false
         #  testSubPath: v17.11.1
          bundleVersion: v17.11.1 # bundle 版本号
@@ -118,13 +117,13 @@ upgradePaths: # 定义升级路径，可以包含多个
        - name: v17.8 # 版本名称
          testCommand: | # 执行测试指令
           gitlab17.8.test --godog.concurrency=1 --godog.format=allure --godog.tags=@prepare --bdd.cleanup=false
-          mv test_dump common
          testSubPath: v17.8
          bundleVersion: v17.8.10 # bundle 版本号
+         testImage: testimage:v17.8.10
        - name: v17.11 # 版本名称
          testCommand: |
-           
            gitlab17.11.test --godog.concurrency=1 --godog.format=allure --godog.tags=@upgrade --bdd.cleanup=false
          testSubPath: v17.11
          bundleVersion: v17.11.1 # bundle 版本号
+         testImage: testimage:v17.8.10
 ```

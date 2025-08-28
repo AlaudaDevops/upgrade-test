@@ -126,8 +126,6 @@ func (uc *UpgradeCommand) Execute() error {
 			return fmt.Errorf("failed to process upgrade path: %s, error: %v", path.Name, err)
 		}
 	}
-
-	logger.Info("upgrade test completed successfully")
 	return nil
 }
 

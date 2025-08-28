@@ -4,11 +4,23 @@ on:
   push:
     branches: [ main, develop ]
     tags: [ 'v*' ]
+    paths:
+      - 'main.go'
+      - 'cmd/**'
+      - 'pkg/**'
+      - 'go.mod'
+      - 'go.sum'
   pull_request:
     branches: [ main, develop ]
+    paths:
+      - 'main.go'
+      - 'cmd/**'
+      - 'pkg/**'
+      - 'go.mod'
+      - 'go.sum'
 
 env:
-  BINARY_NAME: upgrade-test
+  BINARY_NAME: upgrade
 
 jobs:
   # Build and publish Golang binary
@@ -39,28 +51,17 @@ jobs:
 
       - name: Build binary
         env:
-          GOOS: ${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || 'darwin' }}
+          GOOS: linux
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
         run: |
-          # Set binary extension based on OS
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            EXT=".exe"
-          else
-            EXT=""
-          fi
-          
           # Build the binary
           go build -ldflags="-s -w -X main.version=${{ github.ref_name }} -X main.commit=${{ github.sha }} -X main.date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            -o "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}$EXT" \
+            -o "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}" \
             .
           
           # Create checksum file
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            sha256sum "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}$EXT" > "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}$EXT.sha256"
-          else
-            shasum -a 256 "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}$EXT" > "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}$EXT.sha256"
-          fi
+          shasum -a 256 "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}" > "dist/${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}.sha256"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
