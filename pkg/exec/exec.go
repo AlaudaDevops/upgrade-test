@@ -12,6 +12,7 @@ type Command struct {
 	Name string
 	Args []string
 	Dir  string
+	Env  []string
 }
 
 // CommandResult represents the result of a command execution
@@ -42,6 +43,14 @@ func (c *Command) WithEnv(env []string) CommandOption {
 func RunCommand(ctx context.Context, cmd Command) CommandResult {
 	runCmd := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
 	runCmd.Dir = cmd.Dir
+
+	// Inherit current process environment variables
+	runCmd.Env = os.Environ()
+
+	// Add custom environment variables if specified
+	if len(cmd.Env) > 0 {
+		runCmd.Env = append(runCmd.Env, cmd.Env...)
+	}
 
 	// Create buffers to capture output
 	var stdoutBuf, stderrBuf bytes.Buffer

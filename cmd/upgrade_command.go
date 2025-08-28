@@ -197,13 +197,14 @@ func (uc *UpgradeCommand) process(ctx context.Context, path config.UpgradePath) 
 			testCommand = version.TestCommand
 		}
 
-		if version.TestSubPath == "" {
-			version.TestSubPath = "testing"
+		workspace := uc.config.OperatorConfig.Workspace
+		if version.TestSubPath != "" {
+			workspace = fmt.Sprintf("%s/%s", uc.config.OperatorConfig.Workspace, version.TestSubPath)
 		}
 
 		// Execute test commands
 		if err := uc.execCommand(ctx,
-			fmt.Sprintf("%s/%s", uc.config.OperatorConfig.Workspace, version.TestSubPath),
+			workspace,
 			testCommand); err != nil {
 			return fmt.Errorf("failed to execute test command: %v", err)
 		}
