@@ -17,15 +17,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest]
         go-version: [1.24.0]
         arch: [amd64, arm64]
-        exclude:
-          # Exclude arm64 for Windows and macOS as they don't support it well
-          - os: windows-latest
-            arch: arm64
-          - os: macos-latest
-            arch: arm64
     
     permissions:
       contents: read
