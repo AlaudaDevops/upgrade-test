@@ -64,6 +64,8 @@ func (o *Operator) InstallSubscription(ctx context.Context, csv string) error {
 }
 
 func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv string) (*unstructured.Unstructured, error) {
+	log := logging.FromContext(ctx)
+
 	_, err := o.client.Resource(namespaceGVR).Create(ctx, &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "v1",
@@ -98,7 +100,29 @@ func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv 
 			},
 		},
 	}
-	return o.client.Resource(subscriptionGVR).Namespace(namespace).Create(ctx, subscription, metav1.CreateOptions{})
+
+	// Retry creation up to 3 times with exponential backoff
+	var result *unstructured.Unstructured
+	for attempt := 1; attempt <= 3; attempt++ {
+		result, err = o.client.Resource(subscriptionGVR).Namespace(namespace).Create(ctx, subscription, metav1.CreateOptions{})
+		if err == nil {
+			return result, nil
+		}
+
+		// If this is not the last attempt, wait before retrying
+		if attempt < 3 {
+			// Exponential backoff: 1s, 2s, 4s
+			backoffDuration := time.Duration(1<<uint(attempt-1)) * time.Second
+			log.Infow("subscription creation failed, retrying",
+				"attempt", attempt,
+				"error", err.Error(),
+				"backoff", backoffDuration.String())
+			time.Sleep(backoffDuration)
+		}
+	}
+
+	// All attempts failed
+	return nil, fmt.Errorf("failed to create subscription after 3 attempts: %v", err)
 }
 
 func (o *Operator) deleteCSV(ctx context.Context, name, namespace string) error {

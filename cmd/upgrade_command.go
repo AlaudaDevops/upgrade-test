@@ -199,11 +199,6 @@ func (uc *UpgradeCommand) process(ctx context.Context, path config.UpgradePath) 
 			testCommand = version.TestCommand
 		}
 
-		// Checkout git revision
-		if err := uc.execCommand(ctx, uc.workspace, fmt.Sprintf("git checkout %s", version.Revision)); err != nil {
-			return fmt.Errorf("failed to checkout revision %s: %v", version.Revision, err)
-		}
-
 		if version.TestSubPath == "" {
 			version.TestSubPath = "testing"
 		}
