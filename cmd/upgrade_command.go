@@ -190,7 +190,7 @@ func (uc *UpgradeCommand) process(ctx context.Context, path config.UpgradePath) 
 		logger.Infow("deploying operator version", "version", version.Name)
 
 		// Install artifact version
-		if err := uc.operator.UpgradeOperator(ctx, version.BundleVersion); err != nil {
+		if err := uc.operator.UpgradeOperator(ctx, version); err != nil {
 			return fmt.Errorf("failed to prepare operator: %v", err)
 		}
 

@@ -95,16 +95,20 @@ func (o *Operator) GetResource(ctx context.Context, name, namespace string, gvr 
 	return o.client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
-func (o *Operator) UpgradeOperator(ctx context.Context, version string) error {
+func (o *Operator) UpgradeOperator(ctx context.Context, version config.Version) error {
 	// Install artifact version
-	av, err := o.InstallArtifactVersion(ctx, version)
+	av, err := o.InstallArtifactVersion(ctx, version.BundleVersion)
 	if err != nil {
 		return fmt.Errorf("failed to prepare operator: %v", err)
 	}
 
 	// Get CSV version from artifact version
 	csv, _, _ := unstructured.NestedString(av.Object, "status", "version")
-	if err := o.InstallSubscription(ctx, csv); err != nil {
+	channel := version.Channel
+	if channel == "" {
+		channel = "stable" // default fallback
+	}
+	if err := o.InstallSubscription(ctx, csv, channel); err != nil {
 		return fmt.Errorf("failed to install subscription: %v", err)
 	}
 

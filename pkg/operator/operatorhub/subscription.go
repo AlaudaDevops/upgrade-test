@@ -15,7 +15,7 @@ import (
 	"knative.dev/pkg/logging"
 )
 
-func (o *Operator) InstallSubscription(ctx context.Context, csv string) error {
+func (o *Operator) InstallSubscription(ctx context.Context, csv string, channel string) error {
 	if csv == "" {
 		return fmt.Errorf("csv is empty")
 	}
@@ -31,8 +31,8 @@ func (o *Operator) InstallSubscription(ctx context.Context, csv string) error {
 		return fmt.Errorf("failed to delete old csv: %v", err)
 	}
 
-	log.Infow("creating subscription", "name", o.name, "namespace", o.namespace, "csv", csv)
-	_, err := o.createSubscription(ctx, o.name, o.namespace, csv)
+	log.Infow("creating subscription", "name", o.name, "namespace", o.namespace, "csv", csv, "channel", channel)
+	_, err := o.createSubscription(ctx, o.name, o.namespace, csv, channel)
 	if err != nil {
 		return fmt.Errorf("failed to create subscription: %v", err)
 	}
@@ -95,7 +95,7 @@ func (o *Operator) deleteResource(ctx context.Context, gvr schema.GroupVersionRe
 	return nil
 }
 
-func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv string) (*unstructured.Unstructured, error) {
+func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv string, channel string) (*unstructured.Unstructured, error) {
 	log := logging.FromContext(ctx)
 
 	_, err := o.client.Resource(namespaceGVR).Create(ctx, &unstructured.Unstructured{
@@ -123,7 +123,7 @@ func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv 
 				},
 			},
 			"spec": map[string]interface{}{
-				"channel":             "stable",
+				"channel":             channel,
 				"installPlanApproval": "Manual",
 				"name":                name,
 				"source":              "platform",
