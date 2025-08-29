@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/AlaudaDevops/upgrade-test/pkg/config"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -17,6 +18,7 @@ type Operator struct {
 	client    dynamic.Interface
 	namespace string
 	name      string
+	artifact  string
 
 	timeout  time.Duration
 	interval time.Duration
@@ -68,18 +70,24 @@ var (
 )
 
 // NewOperator creates a new Operator instance
-func NewOperator(config *rest.Config, namespace, name string) (*Operator, error) {
+func NewOperator(config *rest.Config, options config.OperatorConfig) (*Operator, error) {
 	client, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}
 
+	artifact := options.Artifact
+	if artifact == "" {
+		artifact = fmt.Sprintf("%s-%s", options.ArtifactPrefix, options.Name)
+	}
+
 	return &Operator{
 		client:    client,
-		namespace: namespace,
-		name:      name,
-		timeout:   10 * time.Minute,
-		interval:  5 * time.Second,
+		namespace: options.Namespace,
+		name:      options.Name,
+		artifact:  artifact,
+		timeout:   options.Timeout,
+		interval:  options.Interval,
 	}, nil
 }
 

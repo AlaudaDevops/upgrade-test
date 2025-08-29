@@ -40,8 +40,8 @@ func NewOperatorFactory() *OperatorFactory {
 func (f *OperatorFactory) CreateOperator(operatorType OperatorType, options OperatorOptions) (OperatorInterface, error) {
 	switch operatorType {
 	case OperatorTypeLocal:
-		return local.NewLocalOperator(options.OperatorConfig.Workspace, options.OperatorConfig.Command)
+		return local.NewLocalOperator(options.OperatorConfig)
 	default:
-		return operatorhub.NewOperator(options.Config, options.Namespace, options.Name)
+		return operatorhub.NewOperator(options.Config, options.OperatorConfig)
 	}
 }

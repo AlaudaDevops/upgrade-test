@@ -16,7 +16,7 @@ func (o *Operator) InstallArtifactVersion(ctx context.Context, version string) (
 	log := logging.FromContext(ctx)
 	log.Infow("installing artifact version", "version", version)
 
-	artifact, err := o.GetResource(ctx, fmt.Sprintf("operatorhub-%s", o.name), systemNamespace, artifactGVR)
+	artifact, err := o.GetResource(ctx, o.artifact, systemNamespace, artifactGVR)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get artifact: %v", err)
 	}
@@ -91,7 +91,7 @@ func (o *Operator) createArtifactVersion(ctx context.Context, version string, ar
 
 func (o *Operator) waitArtifactVersionPresent(ctx context.Context, name string) (*unstructured.Unstructured, error) {
 	lastResource := &unstructured.Unstructured{}
-	err := wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, false, func(ctx context.Context) (done bool, err error) {
+	err := wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (done bool, err error) {
 		obj, err := o.client.Resource(artifactVersionGVR).Namespace(systemNamespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return false, err

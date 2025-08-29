@@ -9,7 +9,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 	"knative.dev/pkg/logging"
 )
 
@@ -21,11 +23,11 @@ func (o *Operator) InstallSubscription(ctx context.Context, csv string) error {
 	log := logging.FromContext(ctx)
 	log.Infow("installing subscription", "csv", csv, "namespace", o.namespace)
 	// Delete the subscription and csv if they exist
-	if err := o.client.Resource(subscriptionGVR).Namespace(o.namespace).Delete(ctx, o.name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+	if err := o.deleteResource(ctx, subscriptionGVR, o.name, o.namespace); err != nil {
 		return fmt.Errorf("failed to delete old subscription: %v", err)
 	}
 
-	if err := o.deleteCSV(ctx, csv, o.namespace); err != nil {
+	if err := o.deleteResource(ctx, csvGVR, csv, o.namespace); err != nil {
 		return fmt.Errorf("failed to delete old csv: %v", err)
 	}
 
@@ -60,6 +62,36 @@ func (o *Operator) InstallSubscription(ctx context.Context, csv string) error {
 	}
 
 	log.Infow("subscription installed successfully", "name", o.name, "namespace", o.namespace)
+	return nil
+}
+
+func (o *Operator) deleteResource(ctx context.Context, gvr schema.GroupVersionResource, name, namespace string) error {
+	log := logging.FromContext(ctx)
+
+	log.Infow("deleting old resource", "gvr", gvr, "name", name, "namespace", namespace)
+	var rsAbled dynamic.ResourceInterface
+	nsEnabled := o.client.Resource(gvr)
+	if namespace != "" {
+		rsAbled = nsEnabled.Namespace(namespace)
+	}
+
+	err := rsAbled.Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete resource %s: %v", name, err)
+	}
+
+	log.Infow("waiting for resource to be deleted", "name", name, "namespace", namespace)
+	err = wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (done bool, err error) {
+		_, err = rsAbled.Get(ctx, name, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			log.Infow("resource not found, deleting resource", "name", name, "namespace", namespace)
+			return true, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete resource %s: %v", name, err)
+	}
 	return nil
 }
 
@@ -125,28 +157,11 @@ func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv 
 	return nil, fmt.Errorf("failed to create subscription after 3 attempts: %v", err)
 }
 
-func (o *Operator) deleteCSV(ctx context.Context, name, namespace string) error {
-	o.client.Resource(csvGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
-	err := wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (done bool, err error) {
-		_, err = o.client.Resource(csvGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-		if errors.IsNotFound(err) {
-			return true, nil
-		}
-		return false, nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to delete csv %s: %v", name, err)
-	}
-	return nil
-}
-
 // waitInstallPlan waits for the subscription to have an install plan and returns the install plan name
 func (o *Operator) waitInstallPlan(ctx context.Context, name, namespace string) (string, error) {
 	var installPlanName string
-	interval := 5 * time.Second
-	timeout := 10 * time.Minute
 
-	err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (done bool, err error) {
+	err := wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (done bool, err error) {
 		obj, err := o.client.Resource(subscriptionGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			return false, err
@@ -186,10 +201,7 @@ func (o *Operator) waitInstallPlan(ctx context.Context, name, namespace string) 
 }
 
 func (o *Operator) waitCSVReady(ctx context.Context, name, namespace string) error {
-	interval := 5 * time.Second
-	timeout := 10 * time.Minute
-
-	err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (done bool, err error) {
+	err := wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (done bool, err error) {
 		csv, err := o.client.Resource(csvGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			return false, err

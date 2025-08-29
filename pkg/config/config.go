@@ -4,6 +4,7 @@ package config
 
 import (
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v2"
 )
@@ -38,6 +39,14 @@ type OperatorConfig struct {
 	// workspace is the path to the workspace directory
 	Workspace string `yaml:"workspace,omitempty"`
 
+	// artifactPrefix is the prefix of the artifact to use, default is "operatorhub"
+	ArtifactPrefix string `yaml:"artifactPrefix,omitempty"`
+
+	// interval is the interval to use for the operator, default is 5 seconds
+	Interval time.Duration `yaml:"interval,omitempty"`
+	// timeout is the timeout to use for the operator, default is 10 minutes
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+
 	// command for running the operator, just for local operator, default is "make deploy"
 	Command string `yaml:"command,omitempty"`
 }
@@ -61,7 +70,7 @@ type Version struct {
 	// testSubPath is the path to the test sub-directory, default is "testing"
 	TestSubPath string `yaml:"testSubPath,omitempty"`
 	// revision is the revision to use for the version
-	Revision string `yaml:"revision,omitempty"`
+	Channel string `yaml:"channel,omitempty"`
 }
 
 // LoadConfig loads the configuration from a YAML file
@@ -86,6 +95,17 @@ func defaultConfig(config *Config) *Config {
 
 	if config.OperatorConfig.Type == "" {
 		config.OperatorConfig.Type = "operatorhub"
+	}
+
+	if config.OperatorConfig.ArtifactPrefix == "" {
+		config.OperatorConfig.ArtifactPrefix = "operatorhub"
+	}
+
+	if config.OperatorConfig.Interval == 0 {
+		config.OperatorConfig.Interval = 5 * time.Second
+	}
+	if config.OperatorConfig.Timeout == 0 {
+		config.OperatorConfig.Timeout = 10 * time.Minute
 	}
 
 	return config
