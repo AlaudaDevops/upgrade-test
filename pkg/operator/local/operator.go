@@ -22,20 +22,20 @@ func NewLocalOperator(options config.OperatorConfig) (*LocalOperator, error) {
 	}, nil
 }
 
-func (o *LocalOperator) UpgradeOperator(ctx context.Context, version string) error {
+func (o *LocalOperator) UpgradeOperator(ctx context.Context, version config.Version) error {
 	log := logging.FromContext(ctx)
 
 	if o.command == "" {
 		o.command = "make deploy"
 	}
 
-	log.Infof("upgrading operator version: %s", version)
+	log.Infof("upgrading operator version: %s", version.Name)
 
-	if err := o.runDeployCommand(ctx, version); err != nil {
+	if err := o.runDeployCommand(ctx, version.BundleVersion); err != nil {
 		return fmt.Errorf("failed to run deploy command: %v", err)
 	}
 
-	log.Infof("operator version %s upgraded successfully", version)
+	log.Infof("operator version %s upgraded successfully", version.Name)
 	return nil
 }
 

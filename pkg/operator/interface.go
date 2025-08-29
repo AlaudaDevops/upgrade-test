@@ -1,9 +1,13 @@
 package operator
 
-import "context"
+import (
+	"context"
+
+	"github.com/AlaudaDevops/upgrade-test/pkg/config"
+)
 
 // OperatorInterface defines the interface for operator operations
 type OperatorInterface interface {
 	// UpgradeOperator upgrades the operator to the given version
-	UpgradeOperator(ctx context.Context, version string) error
+	UpgradeOperator(ctx context.Context, version config.Version) error
 }
