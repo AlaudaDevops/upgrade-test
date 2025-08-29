@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/AlaudaDevops/upgrade-test/pkg/config"
 	"github.com/AlaudaDevops/upgrade-test/pkg/exec"
 	"knative.dev/pkg/logging"
 )
@@ -14,10 +15,10 @@ type LocalOperator struct {
 	versionRevision map[string]string
 }
 
-func NewLocalOperator(workDir string, command string) (*LocalOperator, error) {
+func NewLocalOperator(options config.OperatorConfig) (*LocalOperator, error) {
 	return &LocalOperator{
-		workDir: workDir,
-		command: command,
+		workDir: options.Workspace,
+		command: options.Command,
 	}, nil
 }
 

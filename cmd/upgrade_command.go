@@ -137,6 +137,12 @@ func (uc *UpgradeCommand) getKubeconfig() string {
 			uc.kubeconfig = filepath.Join(os.Getenv("HOME"), ".kube", "config")
 		}
 	}
+
+	// If KUBECONFIG is not set, set it to the kubeconfig path from config file, which will be inherited by the shell running test commands
+	if os.Getenv("KUBECONFIG") == "" {
+		os.Setenv("KUBECONFIG", uc.kubeconfig)
+	}
+
 	return uc.kubeconfig
 }
 
