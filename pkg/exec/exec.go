@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+
+	"knative.dev/pkg/logging"
 )
 
 type Command struct {
@@ -41,6 +43,7 @@ func (c *Command) WithEnv(env []string) CommandOption {
 // If the command fails, it will return the error along with the captured output
 // The command's output will be printed to console in real-time while also being captured
 func RunCommand(ctx context.Context, cmd Command) CommandResult {
+	logger := logging.FromContext(ctx)
 	runCmd := exec.CommandContext(ctx, cmd.Name, cmd.Args...)
 	runCmd.Dir = cmd.Dir
 
@@ -51,6 +54,7 @@ func RunCommand(ctx context.Context, cmd Command) CommandResult {
 	if len(cmd.Env) > 0 {
 		runCmd.Env = append(runCmd.Env, cmd.Env...)
 	}
+	logger.Infow("injecting env", "env", runCmd.Env)
 
 	// Create buffers to capture output
 	var stdoutBuf, stderrBuf bytes.Buffer
