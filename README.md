@@ -79,6 +79,31 @@ mv upgrade-ubuntu-latest-amd64 upgrade && chmod +x upgrade
   - 和数据准备相对应，负责升级实例以及检查准备的数据是否丢失。
   - 存在多次升级时，需要添加 `skip-clean-namespace` 的 Tag 确保执行后实例不被清理。
 
+
+### 编写配置文件
+
+将文件保存为 upgrade.yaml
+
+```yaml
+operatorConfig:
+  workspace: /app/testing/ # test case 执行位置
+  namespace: gitlab-ce-operator # operator 部署 ns
+  name: gitlab-ce-operator # operator 名称
+upgradePaths: # 定义升级路径，可以包含多个
+  - name: v17.8 upgrade to v17.11 # 升级名称
+    versions: # 定义升级路经
+      - name: v17.8 # 版本名称
+        testCommand: |
+          TAGS=@prepare-17.8 GODOG_ARGS="--godog.format=allure" make test
+        bundleVersion: v17.8.10
+        channel: stable
+      - name: v17.11 # 版本名称
+        testCommand: |
+          TAGS=@upgrade-17.11 GODOG_ARGS="--godog.format=allure --bdd.cleanup=false" make test
+        bundleVersion: v17.11.1
+        channel: stable
+```
+
 ### 构建测试镜像
 
 需要在测试镜像中添加升级测试的制品：
@@ -115,30 +140,6 @@ ENV TEST_COMMAND="gitlab.test"
 
 ENTRYPOINT ["gitlab.test"]
 CMD ["--godog.concurrency=2", "--godog.format=allure", "--godog.tags=@prepare-17.8"]
-```
-
-### 编写配置文件
-
-将文件保存为 upgrade.yaml
-
-```yaml
-operatorConfig:
-  workspace: /app/testing/ # test case 执行位置
-  namespace: gitlab-ce-operator # operator 部署 ns
-  name: gitlab-ce-operator # operator 名称
-upgradePaths: # 定义升级路径，可以包含多个
-  - name: v17.8 upgrade to v17.11 # 升级名称
-    versions: # 定义升级路经
-      - name: v17.8 # 版本名称
-        testCommand: |
-          TAGS=@prepare-17.8 GODOG_ARGS="--godog.format=allure" make test
-        bundleVersion: v17.8.10
-        channel: stable
-      - name: v17.11 # 版本名称
-        testCommand: |
-          TAGS=@upgrade-17.11 GODOG_ARGS="--godog.format=allure --bdd.cleanup=false" make test
-        bundleVersion: v17.11.1
-        channel: stable
 ```
 
 ### 运行测试

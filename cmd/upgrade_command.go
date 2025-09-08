@@ -116,6 +116,11 @@ func (uc *UpgradeCommand) Execute() error {
 	}
 	uc.operator = op
 
+	if len(cfg.UpgradePaths) == 0 {
+		logger.Info("no upgrade paths found, skipping")
+		return nil
+	}
+
 	// Process upgrade paths
 	for _, path := range cfg.UpgradePaths {
 		if err := uc.process(ctx, path); err != nil {
