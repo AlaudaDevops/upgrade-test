@@ -35,7 +35,9 @@ func (o *Operator) InstallArtifactVersion(ctx context.Context, version string) (
 
 	csv, found, _ := unstructured.NestedString(av.Object, "status", "version")
 	if !found || csv == "" {
-		return nil, fmt.Errorf("failed to get CSV version from artifact version %s: status.version field is empty or not found", av.GetName())
+		// return nil, fmt.Errorf("failed to get CSV version from artifact version %s: status.version field is empty or not found", av.GetName())
+		log.Infow("failed to get CSV version from artifact version %s: status.version field is empty or not found", av.GetName())
+		csv = fmt.Sprintf("%s.%s", o.name, version)
 	}
 
 	log.Infow("waiting for package manifest", "csv", csv)
