@@ -119,7 +119,7 @@ func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv 
 				"name":      name,
 				"namespace": namespace,
 				"annotations": map[string]interface{}{
-					"cpaas.io/target-namespaces": namespace,
+					"cpaas.io/target-namespaces": "",
 				},
 				"labels": map[string]interface{}{
 					"catalog": "platform",
