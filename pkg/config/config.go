@@ -49,6 +49,35 @@ type OperatorConfig struct {
 
 	// command for running the operator, just for local operator, default is "make deploy"
 	Command string `yaml:"command,omitempty"`
+
+	// Violet configures how the operatorhub flow invokes the external `violet`
+	// binary to create Artifact / ArtifactVersion CRs. When nil, the legacy
+	// in-process path is used (kept for the local operator and for transitional
+	// builds; will be removed once violet path is the only one).
+	Violet *VioletConfig `yaml:"violet,omitempty"`
+}
+
+// VioletConfig captures everything upgrade CLI needs to invoke `violet push`
+// for the operatorhub onboarding flow.
+type VioletConfig struct {
+	// Bin is an optional absolute path to the violet binary. Empty falls back
+	// to looking up `violet` in $PATH.
+	Bin string `yaml:"bin,omitempty"`
+
+	// PackagePrefix is the MinIO (or HTTP) root from which the per-version
+	// .tgz is downloaded. Default: "http://package-minio.alauda.cn:9199/packages/".
+	PackagePrefix string `yaml:"packagePrefix,omitempty"`
+
+	// SkipPush controls whether `--skip-push` is passed to `violet push`.
+	// Pointer so we can distinguish "unset" (treated as true) from "explicit
+	// false" (private-registry scenario that wants violet to also push images).
+	SkipPush *bool `yaml:"skipPush,omitempty"`
+
+	// PushArgs are extra arguments appended verbatim to `violet push`, used to
+	// inject options such as --dest-repo, --plain, --image-pull-secret, --force
+	// in private-registry scenarios. Credentials must come from environment
+	// variables (VIOLET_REGISTRY_USERNAME / VIOLET_REGISTRY_PASSWORD), not here.
+	PushArgs []string `yaml:"pushArgs,omitempty"`
 }
 
 // UpgradePath represents a single upgrade path
@@ -71,7 +100,15 @@ type Version struct {
 	TestSubPath string `yaml:"testSubPath,omitempty"`
 	// revision is the revision to use for the version
 	Channel string `yaml:"channel,omitempty"`
+	// ExpectedSha256, when non-empty, is the lowercase hex SHA-256 of the
+	// downloaded .tgz. The upgrade CLI verifies the digest after download and
+	// fails fast on mismatch. Optional; leave empty to skip verification.
+	ExpectedSha256 string `yaml:"expectedSha256,omitempty"`
 }
+
+// DefaultVioletPackagePrefix is the MinIO root used when OperatorConfig.Violet
+// is configured but its PackagePrefix is left blank.
+const DefaultVioletPackagePrefix = "http://package-minio.alauda.cn:9199/packages/"
 
 // LoadConfig loads the configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
@@ -106,6 +143,16 @@ func defaultConfig(config *Config) *Config {
 	}
 	if config.OperatorConfig.Timeout == 0 {
 		config.OperatorConfig.Timeout = 10 * time.Minute
+	}
+
+	if v := config.OperatorConfig.Violet; v != nil {
+		if v.PackagePrefix == "" {
+			v.PackagePrefix = DefaultVioletPackagePrefix
+		}
+		if v.SkipPush == nil {
+			t := true
+			v.SkipPush = &t
+		}
 	}
 
 	return config

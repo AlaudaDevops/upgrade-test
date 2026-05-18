@@ -26,6 +26,11 @@ type Operator struct {
 
 const (
 	systemNamespace = "cpaas-system"
+	// targetCatalogSource is the OLM catalog source the operatorhub flow targets.
+	// It is referenced both in CR creation (via violet --target-catalog-source)
+	// and by the Subscription spec, so it lives next to systemNamespace to keep
+	// platform-coupled constants in one place.
+	targetCatalogSource = "platform"
 )
 
 var (
