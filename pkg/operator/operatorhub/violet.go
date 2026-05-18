@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -200,24 +202,30 @@ func (o *Operator) installViaViolet(ctx context.Context, version config.Version)
 	return av, nil
 }
 
-// downloadToTemp fetches url into a fresh temporary directory and returns the
-// local file path plus a cleanup function. The caller MUST invoke cleanup
+// downloadToTemp fetches rawURL into a fresh temporary directory and returns
+// the local file path plus a cleanup function. The caller MUST invoke cleanup
 // (typically via defer) once the file is no longer needed. The temp dir is
 // per-call so concurrent installs cannot race on the same path.
-func downloadToTemp(ctx context.Context, url string) (string, func(), error) {
+func downloadToTemp(ctx context.Context, rawURL string) (string, func(), error) {
 	dir, err := os.MkdirTemp("", "upgrade-violet-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("mkdir temp: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 
-	fileName := filepath.Base(url)
-	if fileName == "" || fileName == "." || fileName == "/" {
-		fileName = "package.tgz"
+	// Use net/url + path.Base to extract the last segment of the URL path
+	// itself; filepath.Base("http://host/x.tgz") would return the host on
+	// some platforms and never the file name. path.Base is also the right
+	// operator for forward-slash URL paths regardless of OS.
+	fileName := "package.tgz"
+	if parsed, perr := url.Parse(rawURL); perr == nil {
+		if base := path.Base(parsed.Path); base != "" && base != "." && base != "/" {
+			fileName = base
+		}
 	}
 	filePath := filepath.Join(dir, fileName)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("build request: %w", err)
@@ -232,7 +240,7 @@ func downloadToTemp(ctx context.Context, url string) (string, func(), error) {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		cleanup()
-		return "", nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
+		return "", nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, rawURL)
 	}
 
 	f, err := os.Create(filePath)

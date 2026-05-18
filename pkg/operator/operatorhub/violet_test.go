@@ -1,12 +1,22 @@
 package operatorhub
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic/fake"
 )
 
 func TestBuildPackageURL(t *testing.T) {
@@ -220,4 +230,265 @@ func stringSliceEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// --- validateVioletBin --------------------------------------------------------
+
+func TestValidateVioletBin(t *testing.T) {
+	dir := t.TempDir()
+
+	// Prepare three fixtures: an executable file, a non-executable file, and a directory.
+	exePath := filepath.Join(dir, "violet")
+	if err := os.WriteFile(exePath, []byte("#!/bin/sh\necho fake"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nonExePath := filepath.Join(dir, "not-exe")
+	if err := os.WriteFile(nonExePath, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	subDir := filepath.Join(dir, "subdir")
+	if err := os.Mkdir(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		path       string
+		wantErrSub string // substring expected in the error message ("" = expect nil)
+	}{
+		{"absolute executable file is accepted", exePath, ""},
+		{"relative path is rejected", "violet", "must be an absolute path"},
+		{"missing file surfaces stat error", filepath.Join(dir, "missing"), "stat violet binary"},
+		{"directory is rejected", subDir, "is a directory"},
+		{"non-executable file is rejected", nonExePath, "is not executable"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateVioletBin(tc.path)
+			if tc.wantErrSub == "" {
+				if err != nil {
+					t.Errorf("want nil error, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want error containing %q, got nil", tc.wantErrSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrSub)
+			}
+		})
+	}
+}
+
+// --- downloadToTemp -----------------------------------------------------------
+
+func TestDownloadToTemp_Success(t *testing.T) {
+	payload := []byte("hello violet bundle")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/pkg/tektoncd.tgz" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	url := srv.URL + "/pkg/tektoncd.tgz"
+	path, cleanup, err := downloadToTemp(context.Background(), url)
+	if err != nil {
+		t.Fatalf("downloadToTemp: %v", err)
+	}
+	defer cleanup()
+
+	if filepath.Base(path) != "tektoncd.tgz" {
+		t.Errorf("expected filename from URL, got %s", filepath.Base(path))
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(body) != string(payload) {
+		t.Errorf("body mismatch: got %q, want %q", string(body), string(payload))
+	}
+
+	// cleanup must remove the file (and its temp dir).
+	cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("cleanup should have removed %s; stat err=%v", path, err)
+	}
+}
+
+func TestDownloadToTemp_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil)
+	}))
+	defer srv.Close()
+
+	_, _, err := downloadToTemp(context.Background(), srv.URL+"/missing.tgz")
+	if err == nil {
+		t.Fatal("want error for 404, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should mention status 404, got %v", err)
+	}
+}
+
+func TestDownloadToTemp_5xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, _, err := downloadToTemp(context.Background(), srv.URL+"/x.tgz")
+	if err == nil {
+		t.Fatal("want error for 500, got nil")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should mention status 500, got %v", err)
+	}
+}
+
+func TestDownloadToTemp_DefaultFilename(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	// URL has no path beyond "/" → filepath.Base returns "/", which the
+	// helper must rewrite to "package.tgz" so io.Copy has a real target.
+	path, cleanup, err := downloadToTemp(context.Background(), srv.URL+"/")
+	if err != nil {
+		t.Fatalf("downloadToTemp: %v", err)
+	}
+	defer cleanup()
+	if filepath.Base(path) != "package.tgz" {
+		t.Errorf("expected fallback filename package.tgz, got %s", filepath.Base(path))
+	}
+}
+
+func TestDownloadToTemp_ContextCancel(t *testing.T) {
+	// Server blocks long enough for context cancel to fire before headers
+	// are sent, ensuring the net/http request honours the context.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2 * time.Second)
+		_, _ = w.Write([]byte("late"))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, _, err := downloadToTemp(ctx, srv.URL+"/slow.tgz")
+	if err == nil {
+		t.Fatal("want context error, got nil")
+	}
+	if !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "deadline") {
+		t.Errorf("expected context/deadline error, got %v", err)
+	}
+}
+
+// --- deleteArtifactVersionIfExists --------------------------------------------
+
+// newOperatorWithFakeClient builds a minimal *Operator backed by a fake
+// dynamic client seeded with the supplied objects. Only fields touched by
+// deleteArtifactVersionIfExists need to be populated.
+func newOperatorWithFakeClient(t *testing.T, seed ...runtime.Object) *Operator {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	// Register ArtifactVersion as an unstructured list kind so the fake
+	// client knows how to list/get/delete it.
+	scheme.AddKnownTypeWithName(
+		artifactVersionGVR.GroupVersion().WithKind("ArtifactVersion"),
+		&unstructured.Unstructured{},
+	)
+	scheme.AddKnownTypeWithName(
+		artifactVersionGVR.GroupVersion().WithKind("ArtifactVersionList"),
+		&unstructured.UnstructuredList{},
+	)
+
+	listKinds := map[schemaGVR]string{
+		{artifactVersionGVR.Group, artifactVersionGVR.Version, artifactVersionGVR.Resource}: "ArtifactVersionList",
+	}
+	_ = listKinds // placeholder if extending
+
+	client := fake.NewSimpleDynamicClient(scheme, seed...)
+	return &Operator{
+		client:   client,
+		name:     "tektoncd-operator",
+		artifact: "operatorhub-tektoncd-operator",
+		interval: 10 * time.Millisecond,
+		timeout:  2 * time.Second,
+	}
+}
+
+// schemaGVR is a local alias used only inside the test helper so we do not
+// drag the full k8s schema package into the file headers when not needed.
+type schemaGVR struct{ G, V, R string }
+
+func newAVUnstructured(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": artifactVersionGVR.GroupVersion().String(),
+			"kind":       "ArtifactVersion",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": systemNamespace,
+			},
+			"spec": map[string]interface{}{
+				"present": true,
+				"tag":     "v4.6.0",
+			},
+		},
+	}
+}
+
+func TestDeleteArtifactVersionIfExists_NoResidueIsNoop(t *testing.T) {
+	op := newOperatorWithFakeClient(t)
+	if err := op.deleteArtifactVersionIfExists(context.Background(), "missing.av"); err != nil {
+		t.Errorf("expected nil for missing AV (NotFound is fine), got %v", err)
+	}
+}
+
+func TestDeleteArtifactVersionIfExists_RemovesExistingAV(t *testing.T) {
+	avName := "operatorhub-tektoncd-operator.v4.6.0"
+	op := newOperatorWithFakeClient(t, newAVUnstructured(avName))
+
+	// Sanity: the seed object is visible before delete.
+	got, err := op.client.Resource(artifactVersionGVR).Namespace(systemNamespace).Get(
+		context.Background(), avName, metav1.GetOptions{},
+	)
+	if err != nil || got == nil {
+		t.Fatalf("seed AV should be present, got err=%v", err)
+	}
+
+	if err := op.deleteArtifactVersionIfExists(context.Background(), avName); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// After delete + poll the resource must be gone.
+	_, err = op.client.Resource(artifactVersionGVR).Namespace(systemNamespace).Get(
+		context.Background(), avName, metav1.GetOptions{},
+	)
+	if !errors.IsNotFound(err) {
+		t.Errorf("after delete, expected NotFound, got %v", err)
+	}
+}
+
+func TestDeleteArtifactVersionIfExists_ConcurrentRaceVanishesGracefully(t *testing.T) {
+	// Simulates "Get says exists, but Delete returns NotFound because something
+	// else removed it between the two calls". The helper must absorb that
+	// race rather than propagating it as a hard error.
+	avName := "operatorhub-tektoncd-operator.v4.6.0"
+	op := newOperatorWithFakeClient(t, newAVUnstructured(avName))
+
+	// Pre-delete the object so the helper's own Delete call sees NotFound.
+	if err := op.client.Resource(artifactVersionGVR).Namespace(systemNamespace).
+		Delete(context.Background(), avName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("pre-delete: %v", err)
+	}
+
+	// Helper will Get (NotFound → return nil) and exit cleanly.
+	if err := op.deleteArtifactVersionIfExists(context.Background(), avName); err != nil {
+		t.Errorf("expected nil for race-vanished AV, got %v", err)
+	}
 }
