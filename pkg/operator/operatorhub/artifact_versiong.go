@@ -3,21 +3,22 @@ package operatorhub
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/AlaudaDevops/upgrade-test/pkg/config"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"knative.dev/pkg/logging"
 )
 
 // InstallArtifactVersion is the stable entry point invoked by UpgradeOperator.
-// It needs the whole Version because the channel and (optional) sha256 are
-// required by the violet onboarding flow, not just the bundle version.
-func (o *Operator) InstallArtifactVersion(ctx context.Context, version config.Version) (*unstructured.Unstructured, error) {
+// It returns the CSV name (read from av.status.version inside the violet flow)
+// so the caller does not have to re-extract it — a second extraction site was
+// prone to silently passing an empty csv to InstallSubscription.
+func (o *Operator) InstallArtifactVersion(ctx context.Context, version config.Version) (*unstructured.Unstructured, string, error) {
 	if o.violet == nil {
-		return nil, fmt.Errorf("operatorConfig.violet must be configured to install ArtifactVersion via the violet binary")
+		return nil, "", fmt.Errorf("operatorConfig.violet must be configured to install ArtifactVersion via the violet binary")
 	}
 	return o.installViaViolet(ctx, version)
 }
@@ -70,11 +71,19 @@ func (o *Operator) createArtifactVersion(ctx context.Context, version string, ar
 }
 
 func (o *Operator) waitArtifactVersionPresent(ctx context.Context, name string) (*unstructured.Unstructured, error) {
+	log := logging.FromContext(ctx)
 	lastResource := &unstructured.Unstructured{}
 	err := wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (done bool, err error) {
 		obj, err := o.client.Resource(artifactVersionGVR).Namespace(systemNamespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return false, err
+		switch {
+		case errors.IsNotFound(err):
+			// AV not yet visible — eventual consistency window after violet push.
+			return false, nil
+		case isTransientAPIError(err):
+			log.Warnw("transient API error while polling AV, will retry", "name", name, "err", err)
+			return false, nil
+		case err != nil:
+			return false, fmt.Errorf("get AV %s: %w", name, err)
 		}
 
 		status, _, _ := unstructured.NestedMap(obj.Object, "status")
@@ -93,10 +102,17 @@ func (o *Operator) waitArtifactVersionPresent(ctx context.Context, name string) 
 }
 
 func (o *Operator) waitPackageManifest(ctx context.Context, csv string) error {
+	log := logging.FromContext(ctx)
 	return wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (done bool, err error) {
 		pm, err := o.client.Resource(packageManifestGVR).Namespace(systemNamespace).Get(ctx, o.name, metav1.GetOptions{})
-		if err != nil && !errors.IsNotFound(err) {
-			return false, err
+		switch {
+		case errors.IsNotFound(err):
+			return false, nil
+		case isTransientAPIError(err):
+			log.Warnw("transient API error while polling PackageManifest, will retry", "name", o.name, "err", err)
+			return false, nil
+		case err != nil:
+			return false, fmt.Errorf("get PackageManifest %s: %w", o.name, err)
 		}
 
 		if pm == nil {
@@ -117,8 +133,11 @@ func (o *Operator) waitPackageManifest(ctx context.Context, csv string) error {
 					continue
 				}
 
-				csvName, _, _ := unstructured.NestedString(entryMap, "name")
-				if strings.Contains(csvName, csv) {
+				csvName, found, err := unstructured.NestedString(entryMap, "name")
+				if err != nil {
+					return false, fmt.Errorf("PackageManifest %s entry .name has wrong type: %w", o.name, err)
+				}
+				if found && csvName == csv {
 					return true, nil
 				}
 			}
@@ -126,4 +145,14 @@ func (o *Operator) waitPackageManifest(ctx context.Context, csv string) error {
 
 		return false, nil
 	})
+}
+
+// isTransientAPIError reports whether err is a Kubernetes API error worth
+// retrying on (apiserver timeout, throttling, brief unavailability). Permanent
+// errors (RBAC denied, Forbidden, malformed request) must propagate so the
+// poll loop fails fast with the real reason instead of timing out.
+func isTransientAPIError(err error) bool {
+	return errors.IsServerTimeout(err) ||
+		errors.IsTooManyRequests(err) ||
+		errors.IsServiceUnavailable(err)
 }

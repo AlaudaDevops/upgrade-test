@@ -294,7 +294,7 @@ func TestDownloadToTemp_Success(t *testing.T) {
 	defer srv.Close()
 
 	url := srv.URL + "/pkg/tektoncd.tgz"
-	path, cleanup, err := downloadToTemp(context.Background(), url)
+	path, cleanup, err := downloadToTemp(context.Background(), url, 5*time.Second)
 	if err != nil {
 		t.Fatalf("downloadToTemp: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestDownloadToTemp_404(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := downloadToTemp(context.Background(), srv.URL+"/missing.tgz")
+	_, _, err := downloadToTemp(context.Background(), srv.URL+"/missing.tgz", 5*time.Second)
 	if err == nil {
 		t.Fatal("want error for 404, got nil")
 	}
@@ -339,7 +339,7 @@ func TestDownloadToTemp_5xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := downloadToTemp(context.Background(), srv.URL+"/x.tgz")
+	_, _, err := downloadToTemp(context.Background(), srv.URL+"/x.tgz", 5*time.Second)
 	if err == nil {
 		t.Fatal("want error for 500, got nil")
 	}
@@ -356,7 +356,7 @@ func TestDownloadToTemp_DefaultFilename(t *testing.T) {
 
 	// URL has no path beyond "/" → filepath.Base returns "/", which the
 	// helper must rewrite to "package.tgz" so io.Copy has a real target.
-	path, cleanup, err := downloadToTemp(context.Background(), srv.URL+"/")
+	path, cleanup, err := downloadToTemp(context.Background(), srv.URL+"/", 5*time.Second)
 	if err != nil {
 		t.Fatalf("downloadToTemp: %v", err)
 	}
@@ -378,9 +378,32 @@ func TestDownloadToTemp_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, _, err := downloadToTemp(ctx, srv.URL+"/slow.tgz")
+	_, _, err := downloadToTemp(ctx, srv.URL+"/slow.tgz", 5*time.Second)
 	if err == nil {
 		t.Fatal("want context error, got nil")
+	}
+	if !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "deadline") {
+		t.Errorf("expected context/deadline error, got %v", err)
+	}
+}
+
+func TestDownloadToTemp_TimeoutEnforcedWithoutParentDeadline(t *testing.T) {
+	// Parent ctx has no deadline; downloadToTemp's own timeout must still
+	// abort the request when the server stalls. Regression guard for "the
+	// upgrade CLI passes a bare ctx and downloads hang on TCP keepalive".
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2 * time.Second)
+		_, _ = w.Write([]byte("late"))
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	_, _, err := downloadToTemp(context.Background(), srv.URL+"/slow.tgz", 80*time.Millisecond)
+	if err == nil {
+		t.Fatal("want deadline error, got nil")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("downloadToTemp should honour its own timeout (~80ms), took %v", elapsed)
 	}
 	if !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "deadline") {
 		t.Errorf("expected context/deadline error, got %v", err)

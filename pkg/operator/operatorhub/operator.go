@@ -107,19 +107,20 @@ func (o *Operator) GetResource(ctx context.Context, name, namespace string, gvr 
 }
 
 func (o *Operator) UpgradeOperator(ctx context.Context, version config.Version) error {
-	// Install artifact version
-	av, err := o.InstallArtifactVersion(ctx, version)
+	// version.Channel is required end-to-end: BuildPackageURL already refuses
+	// an empty channel, and InstallSubscription needs an exact channel name
+	// (a silent "stable" fallback would route the Subscription through the
+	// wrong OLM channel and install the wrong CSV stream on a typo).
+	if version.Channel == "" {
+		return fmt.Errorf("version.channel is required")
+	}
+
+	_, csv, err := o.InstallArtifactVersion(ctx, version)
 	if err != nil {
 		return fmt.Errorf("failed to prepare operator: %v", err)
 	}
 
-	// Get CSV version from artifact version
-	csv, _, _ := unstructured.NestedString(av.Object, "status", "version")
-	channel := version.Channel
-	if channel == "" {
-		channel = "stable" // default fallback
-	}
-	if err := o.InstallSubscription(ctx, csv, channel); err != nil {
+	if err := o.InstallSubscription(ctx, csv, version.Channel); err != nil {
 		return fmt.Errorf("failed to install subscription: %v", err)
 	}
 

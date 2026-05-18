@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/AlaudaDevops/upgrade-test/pkg/config"
 	"github.com/AlaudaDevops/upgrade-test/pkg/exec"
@@ -134,50 +135,48 @@ func VerifySha256(filePath, expected string) error {
 // CSV. The upstream Artifact CR is expected to already exist (managed out of
 // band); only the ArtifactVersion write path is delegated to violet.
 //
-// Steps: 1) get Artifact, 2) build URL, 3) download .tgz, 4) verify sha256,
-// 5) delete any residue AV with the same name (so wait does not match it),
-// 6) exec violet push with allowlist env, 7) wait AV Present, 8) wait
-// PackageManifest. Each stage prefixes its error with a short label so the
-// caller can locate the failure without re-running.
-func (o *Operator) installViaViolet(ctx context.Context, version config.Version) (*unstructured.Unstructured, error) {
+// Returns (av, csv, err) so callers do not have to re-read status.version
+// from the unstructured object — a second extraction site was prone to
+// silently feeding an empty csv to InstallSubscription.
+func (o *Operator) installViaViolet(ctx context.Context, version config.Version) (*unstructured.Unstructured, string, error) {
 	log := logging.FromContext(ctx)
 	log.Infow("installing artifact version via violet",
 		"bundleVersion", version.BundleVersion, "channel", version.Channel)
 
 	artifact, err := o.GetResource(ctx, o.artifact, systemNamespace, artifactGVR)
 	if err != nil {
-		return nil, fmt.Errorf("get artifact %s: %w", o.artifact, err)
+		return nil, "", fmt.Errorf("get artifact %s: %w", o.artifact, err)
 	}
 
 	url, err := BuildPackageURL(o.violet.PackagePrefix, o.name, version.Channel, version.BundleVersion)
 	if err != nil {
-		return nil, fmt.Errorf("build package url: %w", err)
+		return nil, "", fmt.Errorf("build package url: %w", err)
 	}
 	log.Infow("downloading violet package", "url", url)
 
-	tgzPath, cleanup, err := downloadToTemp(ctx, url)
+	tgzPath, cleanup, err := downloadToTemp(ctx, url, o.timeout)
 	if err != nil {
-		return nil, fmt.Errorf("download %s: %w", url, err)
+		return nil, "", fmt.Errorf("download %s: %w", url, err)
 	}
 	defer cleanup()
 
 	if err := VerifySha256(tgzPath, version.ExpectedSha256); err != nil {
-		return nil, fmt.Errorf("verify sha256: %w", err)
+		return nil, "", fmt.Errorf("verify sha256: %w", err)
 	}
 
 	avName := fmt.Sprintf("%s.%s", artifact.GetName(), version.BundleVersion)
 	if err := o.deleteArtifactVersionIfExists(ctx, avName); err != nil {
-		return nil, fmt.Errorf("ensure clean AV %s: %w", avName, err)
+		return nil, "", fmt.Errorf("ensure clean AV %s: %w", avName, err)
 	}
 
 	if err := o.execVioletPush(ctx, tgzPath); err != nil {
-		return nil, fmt.Errorf("violet push: %w", err)
+		return nil, "", fmt.Errorf("violet push: %w", err)
 	}
 
 	log.Infow("waiting for ArtifactVersion to reach Present", "name", avName)
 	av, err := o.waitArtifactVersionPresent(ctx, avName)
 	if err != nil {
-		return nil, fmt.Errorf("wait artifact version present: %w", err)
+		return nil, "", fmt.Errorf("wait artifact version present: %w", err)
 	}
 
 	// Cross-check: violet might use a naming convention we did not expect. If
@@ -185,28 +184,35 @@ func (o *Operator) installViaViolet(ctx context.Context, version config.Version)
 	// BundleVersion, surface it loudly rather than silently accepting a stale
 	// or unrelated AV.
 	if tag, _, _ := unstructured.NestedString(av.Object, "spec", "tag"); tag != version.BundleVersion {
-		return nil, fmt.Errorf("artifact version %s has spec.tag=%q, expected %q (violet may not follow the <artifact>.<bundleVersion> naming convention)",
+		return nil, "", fmt.Errorf("artifact version %s has spec.tag=%q, expected %q (violet may not follow the <artifact>.<bundleVersion> naming convention)",
 			avName, tag, version.BundleVersion)
 	}
 
 	csv, found, _ := unstructured.NestedString(av.Object, "status", "version")
 	if !found || csv == "" {
-		return nil, fmt.Errorf("artifact version %s status.version is empty", avName)
+		return nil, "", fmt.Errorf("artifact version %s status.version is empty", avName)
 	}
 	log.Infow("waiting for package manifest", "csv", csv)
 	if err := o.waitPackageManifest(ctx, csv); err != nil {
-		return nil, fmt.Errorf("wait package manifest for csv %s: %w", csv, err)
+		return nil, "", fmt.Errorf("wait package manifest for csv %s: %w", csv, err)
 	}
 
 	log.Infow("artifact version installed via violet", "name", av.GetName())
-	return av, nil
+	return av, csv, nil
 }
 
 // downloadToTemp fetches rawURL into a fresh temporary directory and returns
 // the local file path plus a cleanup function. The caller MUST invoke cleanup
 // (typically via defer) once the file is no longer needed. The temp dir is
 // per-call so concurrent installs cannot race on the same path.
-func downloadToTemp(ctx context.Context, rawURL string) (string, func(), error) {
+//
+// `timeout` bounds the entire HTTP exchange (dial + headers + body). It is
+// applied via a derived context so a slow or half-open MinIO peer cannot pin
+// the goroutine for hours waiting on OS-level TCP keepalive.
+func downloadToTemp(ctx context.Context, rawURL string, timeout time.Duration) (string, func(), error) {
+	dlCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	dir, err := os.MkdirTemp("", "upgrade-violet-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("mkdir temp: %w", err)
@@ -225,7 +231,7 @@ func downloadToTemp(ctx context.Context, rawURL string) (string, func(), error) 
 	}
 	filePath := filepath.Join(dir, fileName)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("build request: %w", err)
@@ -248,11 +254,19 @@ func downloadToTemp(ctx context.Context, rawURL string) (string, func(), error) 
 		cleanup()
 		return "", nil, fmt.Errorf("create %s: %w", filePath, err)
 	}
-	defer f.Close()
 
+	// Explicit close-and-check: on many filesystems write buffers are only
+	// flushed during Close(), so swallowing its error via defer can let a
+	// truncated .tgz reach VerifySha256 (which is optional today) and then
+	// violet push, producing a misleading "violet push:" error.
 	if _, err := io.Copy(f, resp.Body); err != nil {
+		_ = f.Close()
 		cleanup()
 		return "", nil, fmt.Errorf("copy body to %s: %w", filePath, err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close %s after download: %w", filePath, err)
 	}
 
 	return filePath, cleanup, nil
