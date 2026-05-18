@@ -5,49 +5,29 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/AlaudaDevops/upgrade-test/pkg/config"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"knative.dev/pkg/logging"
 )
 
-func (o *Operator) InstallArtifactVersion(ctx context.Context, version string) (*unstructured.Unstructured, error) {
-	log := logging.FromContext(ctx)
-	log.Infow("installing artifact version", "version", version)
-
-	artifact, err := o.GetResource(ctx, o.artifact, systemNamespace, artifactGVR)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get artifact: %v", err)
+// InstallArtifactVersion is the stable entry point invoked by UpgradeOperator.
+// It needs the whole Version because the channel and (optional) sha256 are
+// required by the violet onboarding flow, not just the bundle version.
+func (o *Operator) InstallArtifactVersion(ctx context.Context, version config.Version) (*unstructured.Unstructured, error) {
+	if o.violet == nil {
+		return nil, fmt.Errorf("operatorConfig.violet must be configured to install ArtifactVersion via the violet binary")
 	}
-
-	log.Infow("creating artifact version", "name", artifact.GetName())
-	av, err := o.createArtifactVersion(ctx, version, artifact)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create artifact version: %v", err)
-	}
-
-	log.Infow("waiting for artifact version to be present", "name", av.GetName())
-	av, err = o.waitArtifactVersionPresent(ctx, av.GetName())
-	if err != nil {
-		return nil, fmt.Errorf("failed to wait for artifact version: %v", err)
-	}
-
-	csv, found, _ := unstructured.NestedString(av.Object, "status", "version")
-	if !found || csv == "" {
-		return nil, fmt.Errorf("failed to get CSV version from artifact version %s: status.version field is empty or not found", av.GetName())
-	}
-
-	log.Infow("waiting for package manifest", "csv", csv)
-	err = o.waitPackageManifest(ctx, csv)
-	if err != nil {
-		return nil, fmt.Errorf("failed to ensure package manifest: %v", err)
-	}
-
-	log.Infow("artifact version installed successfully", "name", av.GetName())
-	return av, nil
+	return o.installViaViolet(ctx, version)
 }
 
+// createArtifactVersion is no longer reachable from InstallArtifactVersion as
+// of PR 2 — the violet binary owns the write path. Kept here as dead code for
+// one release cycle so PR 2 regressions can be diff-compared against the
+// previous in-process implementation. PR 3 deletes this function.
+//
+// Deprecated: use installViaViolet via InstallArtifactVersion.
 func (o *Operator) createArtifactVersion(ctx context.Context, version string, artifact *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 	avName := fmt.Sprintf("%s.%s", artifact.GetName(), version)
 	av, err := o.GetResource(ctx, avName, systemNamespace, artifactVersionGVR)

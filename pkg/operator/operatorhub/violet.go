@@ -1,12 +1,23 @@
 package operatorhub
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"github.com/AlaudaDevops/upgrade-test/pkg/config"
+	"github.com/AlaudaDevops/upgrade-test/pkg/exec"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"knative.dev/pkg/logging"
 )
 
 // Environment variables consumed when assembling `violet push`. They are
@@ -111,6 +122,226 @@ func VerifySha256(filePath, expected string) error {
 	actual := hex.EncodeToString(h.Sum(nil))
 	if !strings.EqualFold(actual, expected) {
 		return fmt.Errorf("sha256 mismatch for %s: expected %s, got %s", filePath, expected, actual)
+	}
+	return nil
+}
+
+// installViaViolet onboards the bundle for `version` by invoking the external
+// `violet push` binary, then waits for the resulting ArtifactVersion CR to
+// reach phase=Present and for the OLM PackageManifest to expose the matching
+// CSV. The upstream Artifact CR is expected to already exist (managed out of
+// band); only the ArtifactVersion write path is delegated to violet.
+//
+// Steps: 1) get Artifact, 2) build URL, 3) download .tgz, 4) verify sha256,
+// 5) delete any residue AV with the same name (so wait does not match it),
+// 6) exec violet push with allowlist env, 7) wait AV Present, 8) wait
+// PackageManifest. Each stage prefixes its error with a short label so the
+// caller can locate the failure without re-running.
+func (o *Operator) installViaViolet(ctx context.Context, version config.Version) (*unstructured.Unstructured, error) {
+	log := logging.FromContext(ctx)
+	log.Infow("installing artifact version via violet",
+		"bundleVersion", version.BundleVersion, "channel", version.Channel)
+
+	artifact, err := o.GetResource(ctx, o.artifact, systemNamespace, artifactGVR)
+	if err != nil {
+		return nil, fmt.Errorf("get artifact %s: %w", o.artifact, err)
+	}
+
+	url, err := BuildPackageURL(o.violet.PackagePrefix, o.name, version.Channel, version.BundleVersion)
+	if err != nil {
+		return nil, fmt.Errorf("build package url: %w", err)
+	}
+	log.Infow("downloading violet package", "url", url)
+
+	tgzPath, cleanup, err := downloadToTemp(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", url, err)
+	}
+	defer cleanup()
+
+	if err := VerifySha256(tgzPath, version.ExpectedSha256); err != nil {
+		return nil, fmt.Errorf("verify sha256: %w", err)
+	}
+
+	avName := fmt.Sprintf("%s.%s", artifact.GetName(), version.BundleVersion)
+	if err := o.deleteArtifactVersionIfExists(ctx, avName); err != nil {
+		return nil, fmt.Errorf("ensure clean AV %s: %w", avName, err)
+	}
+
+	if err := o.execVioletPush(ctx, tgzPath); err != nil {
+		return nil, fmt.Errorf("violet push: %w", err)
+	}
+
+	log.Infow("waiting for ArtifactVersion to reach Present", "name", avName)
+	av, err := o.waitArtifactVersionPresent(ctx, avName)
+	if err != nil {
+		return nil, fmt.Errorf("wait artifact version present: %w", err)
+	}
+
+	// Cross-check: violet might use a naming convention we did not expect. If
+	// the CR we waited on has a different spec.tag than the requested
+	// BundleVersion, surface it loudly rather than silently accepting a stale
+	// or unrelated AV.
+	if tag, _, _ := unstructured.NestedString(av.Object, "spec", "tag"); tag != version.BundleVersion {
+		return nil, fmt.Errorf("artifact version %s has spec.tag=%q, expected %q (violet may not follow the <artifact>.<bundleVersion> naming convention)",
+			avName, tag, version.BundleVersion)
+	}
+
+	csv, found, _ := unstructured.NestedString(av.Object, "status", "version")
+	if !found || csv == "" {
+		return nil, fmt.Errorf("artifact version %s status.version is empty", avName)
+	}
+	log.Infow("waiting for package manifest", "csv", csv)
+	if err := o.waitPackageManifest(ctx, csv); err != nil {
+		return nil, fmt.Errorf("wait package manifest for csv %s: %w", csv, err)
+	}
+
+	log.Infow("artifact version installed via violet", "name", av.GetName())
+	return av, nil
+}
+
+// downloadToTemp fetches url into a fresh temporary directory and returns the
+// local file path plus a cleanup function. The caller MUST invoke cleanup
+// (typically via defer) once the file is no longer needed. The temp dir is
+// per-call so concurrent installs cannot race on the same path.
+func downloadToTemp(ctx context.Context, url string) (string, func(), error) {
+	dir, err := os.MkdirTemp("", "upgrade-violet-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("mkdir temp: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+
+	fileName := filepath.Base(url)
+	if fileName == "" || fileName == "." || fileName == "/" {
+		fileName = "package.tgz"
+	}
+	filePath := filepath.Join(dir, fileName)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("http get: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		cleanup()
+		return "", nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
+	}
+
+	f, err := os.Create(filePath)
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("create %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("copy body to %s: %w", filePath, err)
+	}
+
+	return filePath, cleanup, nil
+}
+
+// deleteArtifactVersionIfExists removes a stale ArtifactVersion with the same
+// name and polls until the API confirms the deletion. This prevents
+// waitArtifactVersionPresent from instantly matching a residue object from a
+// previous upgrade attempt and reporting a false success.
+func (o *Operator) deleteArtifactVersionIfExists(ctx context.Context, name string) error {
+	log := logging.FromContext(ctx)
+
+	existing, err := o.GetResource(ctx, name, systemNamespace, artifactVersionGVR)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get existing AV: %w", err)
+	}
+
+	log.Infow("deleting residue ArtifactVersion before invoking violet",
+		"name", existing.GetName(), "uid", existing.GetUID())
+
+	if err := o.client.Resource(artifactVersionGVR).Namespace(systemNamespace).
+		Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete: %w", err)
+	}
+
+	return wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (bool, error) {
+		_, err := o.client.Resource(artifactVersionGVR).Namespace(systemNamespace).
+			Get(ctx, name, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	})
+}
+
+// violetEnvAllowlist constrains which host environment variables flow into
+// the violet child process. KUBECONFIG / PATH / HOME / USER are operational
+// essentials; VIOLET_* covers VIOLET_REGISTRY_USERNAME / _PASSWORD and any
+// future violet-specific overrides without leaking unrelated CI secrets such
+// as GITHUB_TOKEN or AWS_*.
+var violetEnvAllowlist = []string{
+	"KUBECONFIG",
+	"PATH",
+	"HOME",
+	"USER",
+	"VIOLET_*",
+}
+
+// execVioletPush runs `violet push <tgz>` as a child process. Credentials
+// from VIOLET_REGISTRY_USERNAME / _PASSWORD are auto-injected into argv by
+// BuildVioletPushArgs; the rendered command is mask-logged before exec.
+func (o *Operator) execVioletPush(ctx context.Context, tgzPath string) error {
+	log := logging.FromContext(ctx)
+
+	bin := o.violet.Bin
+	if bin == "" {
+		bin = "violet"
+	} else if err := validateVioletBin(bin); err != nil {
+		return err
+	}
+
+	skipPush := true
+	if o.violet.SkipPush != nil {
+		skipPush = *o.violet.SkipPush
+	}
+	args := BuildVioletPushArgs(tgzPath, skipPush, o.violet.PushArgs)
+
+	log.Infow("invoking violet", "cmd", MaskCommand(bin, args))
+
+	result := exec.RunCommand(ctx, exec.Command{
+		Name:         bin,
+		Args:         args,
+		EnvAllowlist: violetEnvAllowlist,
+	})
+	return result.Err
+}
+
+// validateVioletBin guards against accidentally executing a binary at an
+// arbitrary user-supplied path. When Violet.Bin is non-empty it must be an
+// absolute path to an executable regular file; otherwise return a typed
+// error so the upgrade fails before any network or cluster action.
+func validateVioletBin(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("violet.bin must be an absolute path, got %q", path)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat violet binary %s: %w", path, err)
+	}
+	if fi.IsDir() {
+		return fmt.Errorf("violet.bin %s is a directory, not an executable", path)
+	}
+	if fi.Mode()&0o111 == 0 {
+		return fmt.Errorf("violet.bin %s is not executable", path)
 	}
 	return nil
 }
