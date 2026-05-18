@@ -68,7 +68,7 @@ mv upgrade-ubuntu-latest-amd64 upgrade && chmod +x upgrade
         """
         url: http://test-gitlab-upgrade.example.com
         username: root
-        password: 07Apples@
+        password: redacted-password
         timeout: 15m
         importProjectPath: ./testdata/resources/test-upgrade-repo_export.tar.gz
         """
@@ -95,10 +95,9 @@ operatorConfig:
     clusters: devops                              # 写入的目标子集群名；默认 "global"，多集群部署必填
     # bin: /usr/local/bin/violet  # 可选；为空则在 $PATH 查 `violet`
     # skipPush: true              # 默认 true；私有 registry 场景置 false
-    # force: true                 # 默认 true；不开 violet 会误判 "already exist, skip" 导致 wait 超时
-    # pushArgs:                   # 私有场景透传给 `violet push` 的额外参数
-    #   - --dest-repo
-    #   - registry.private/devops
+    # pushArgs:                   # 私有场景透传给 `violet push` 的额外非凭证参数
+    #   - --dest-repo             # 凭证 (--username/--password/--platform-username/--platform-password)
+    #   - registry.private/devops # 必须走环境变量，pushArgs 写入会被 CLI 拒绝
     #   - --plain
     #   - --image-pull-secret
     #   - private-pull
@@ -196,7 +195,7 @@ upgrade CLI 调用 violet 时**只透传**以下宿主环境变量：`KUBECONFIG
 | 推送镜像到私有 registry | `VIOLET_REGISTRY_USERNAME` / `VIOLET_REGISTRY_PASSWORD` | `--username` / `--password` | 仅 `skipPush: false` 私有场景 |
 
 ```sh
-export VIOLET_PLATFORM_USERNAME=admin@cpaas.io
+export VIOLET_PLATFORM_USERNAME=admin@example.invalid
 export VIOLET_PLATFORM_PASSWORD=<password>
 # 仅私有 push 场景需要的额外两行:
 # export VIOLET_REGISTRY_USERNAME=<user>

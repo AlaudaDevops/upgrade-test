@@ -49,12 +49,40 @@ const (
 	flagPlatformPassword    = "--platform-password"
 )
 
-// sensitivePasswordFlags lists every violet flag whose immediately following
-// argv token is a credential — MaskCommand redacts each of them in logs.
+// isPasswordFlag reports whether `arg` is a violet flag whose immediately
+// following argv token is a credential — MaskCommand redacts each in logs.
 // argv-mode leakage to OS (ps auxe / /proc) remains as documented in the README.
-var sensitivePasswordFlags = map[string]bool{
-	flagPassword:         true,
-	flagPlatformPassword: true,
+func isPasswordFlag(arg string) bool {
+	return arg == flagPassword || arg == flagPlatformPassword
+}
+
+// credentialFlagsForbiddenInPushArgs lists violet flags that the upgrade CLI
+// will not let through Violet.PushArgs. The contract is "credentials only via
+// env vars" — letting a user smuggle --password / --platform-password via
+// config.yaml would silently put a real secret into git and into the OS argv
+// table without any redaction the env-injection path provides.
+var credentialFlagsForbiddenInPushArgs = []string{
+	flagUsername, flagPassword,
+	flagPlatformUsername, flagPlatformPassword,
+}
+
+// validatePushArgs rejects any attempt to smuggle a credential flag through
+// Violet.PushArgs, in both the bare "--password value" form and the
+// "--password=value" form. Returns an error naming the offending argument.
+func validatePushArgs(args []string) error {
+	for _, arg := range args {
+		flag := arg
+		if i := strings.IndexByte(arg, '='); i > 0 {
+			flag = arg[:i]
+		}
+		for _, forbidden := range credentialFlagsForbiddenInPushArgs {
+			if flag == forbidden {
+				return fmt.Errorf("violet.pushArgs must not contain credential flag %q; "+
+					"set VIOLET_REGISTRY_USERNAME / _PASSWORD / VIOLET_PLATFORM_USERNAME / _PASSWORD environment variables instead", arg)
+			}
+		}
+	}
+	return nil
 }
 
 // BuildPackageURL composes the .tgz URL by the agreed MinIO convention:
@@ -87,7 +115,6 @@ func BuildPackageURL(prefix, name, channel, bundleVersion string) (string, error
 type VioletPushParams struct {
 	TgzPath         string
 	SkipPush        bool
-	Force           bool
 	PlatformAddress string
 	Clusters        string
 	PushArgs        []string
@@ -101,13 +128,18 @@ type VioletPushParams struct {
 //
 // PushArgs is appended verbatim so unsupported flags can still be threaded
 // through without a code change.
-func BuildVioletPushArgs(p VioletPushParams) []string {
-	args := []string{"push", p.TgzPath, flagTargetCatalogSource, targetCatalogSource}
+func BuildVioletPushArgs(p VioletPushParams) ([]string, error) {
+	if err := validatePushArgs(p.PushArgs); err != nil {
+		return nil, err
+	}
+	// --force is always set: without it violet aborts AV upserts with
+	// "already exist, skip it" and creates nothing, defeating the entire
+	// flow. There is no realistic scenario where the upgrade CLI wants to
+	// preserve a stale AV — if such a need arises, the caller already
+	// deletes the residue before invoking violet.
+	args := []string{"push", p.TgzPath, flagTargetCatalogSource, targetCatalogSource, flagForce}
 	if p.SkipPush {
 		args = append(args, flagSkipPush)
-	}
-	if p.Force {
-		args = append(args, flagForce)
 	}
 	if p.PlatformAddress != "" {
 		args = append(args, flagPlatformAddress, p.PlatformAddress)
@@ -128,7 +160,7 @@ func BuildVioletPushArgs(p VioletPushParams) []string {
 		args = append(args, flagPlatformPassword, p2)
 	}
 	args = append(args, p.PushArgs...)
-	return args
+	return args, nil
 }
 
 // MaskCommand renders the command for logging, replacing the token following
@@ -140,7 +172,7 @@ func MaskCommand(name string, args []string) string {
 	parts := make([]string, 0, len(args)+1)
 	parts = append(parts, name)
 	for i := 0; i < len(args); i++ {
-		if sensitivePasswordFlags[args[i]] && i+1 < len(args) {
+		if isPasswordFlag(args[i]) && i+1 < len(args) {
 			parts = append(parts, args[i], "***")
 			i++
 			continue
@@ -353,15 +385,18 @@ func (o *Operator) deleteArtifactVersionIfExists(ctx context.Context, name strin
 
 // violetEnvAllowlist constrains which host environment variables flow into
 // the violet child process. KUBECONFIG / PATH / HOME / USER are operational
-// essentials; VIOLET_* covers VIOLET_REGISTRY_USERNAME / _PASSWORD and any
-// future violet-specific overrides without leaking unrelated CI secrets such
-// as GITHUB_TOKEN or AWS_*.
+// essentials; the four VIOLET_* names cover registry + platform credential
+// pairs. Exact enumeration (not a prefix glob) so introducing a new
+// VIOLET_* env requires a code change reviewed alongside the env reader.
 var violetEnvAllowlist = []string{
 	"KUBECONFIG",
 	"PATH",
 	"HOME",
 	"USER",
-	"VIOLET_*",
+	EnvVioletRegistryUsername,
+	EnvVioletRegistryPassword,
+	EnvVioletPlatformUsername,
+	EnvVioletPlatformPassword,
 }
 
 // execVioletPush runs `violet push <tgz>` as a child process. Credentials
@@ -378,33 +413,36 @@ func (o *Operator) execVioletPush(ctx context.Context, tgzPath string) error {
 		return err
 	}
 
-	args := BuildVioletPushArgs(VioletPushParams{
+	skipPush := true
+	if o.violet.SkipPush != nil {
+		skipPush = *o.violet.SkipPush
+	}
+	args, err := BuildVioletPushArgs(VioletPushParams{
 		TgzPath:         tgzPath,
-		SkipPush:        derefBoolDefault(o.violet.SkipPush, true),
-		Force:           derefBoolDefault(o.violet.Force, true),
+		SkipPush:        skipPush,
 		PlatformAddress: o.violet.PlatformAddress,
 		Clusters:        o.violet.Clusters,
 		PushArgs:        o.violet.PushArgs,
 	})
+	if err != nil {
+		return err
+	}
 
 	log.Infow("invoking violet", "cmd", MaskCommand(bin, args))
 
+	// Also redact the credential values themselves from violet's own
+	// stdout/stderr — MaskCommand only protects the line WE log, not what
+	// violet itself might echo (e.g. verbose argv dumps).
 	result := exec.RunCommand(ctx, exec.Command{
 		Name:         bin,
 		Args:         args,
 		EnvAllowlist: violetEnvAllowlist,
+		RedactSecrets: []string{
+			os.Getenv(EnvVioletRegistryPassword),
+			os.Getenv(EnvVioletPlatformPassword),
+		},
 	})
 	return result.Err
-}
-
-// derefBoolDefault returns *p when p is non-nil, otherwise the supplied
-// default. Used to apply VioletConfig's "unset means on" semantics for
-// SkipPush and Force at the call site of BuildVioletPushArgs.
-func derefBoolDefault(p *bool, fallback bool) bool {
-	if p == nil {
-		return fallback
-	}
-	return *p
 }
 
 // validateVioletBin guards against accidentally executing a binary at an

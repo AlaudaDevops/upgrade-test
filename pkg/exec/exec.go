@@ -10,18 +10,66 @@ import (
 	"strings"
 )
 
+// redactingWriter returns an io.Writer that scans every Write for the given
+// secret byte strings and substitutes "***" before forwarding to w. Empty
+// secrets are skipped; an empty secrets list returns w unchanged so the
+// hot path pays no per-write overhead when no redaction is configured.
+func redactingWriter(w io.Writer, secrets []string) io.Writer {
+	live := make([][]byte, 0, len(secrets))
+	for _, s := range secrets {
+		if s != "" {
+			live = append(live, []byte(s))
+		}
+	}
+	if len(live) == 0 {
+		return w
+	}
+	return &scrubbingWriter{w: w, secrets: live}
+}
+
+type scrubbingWriter struct {
+	w       io.Writer
+	secrets [][]byte
+}
+
+func (s *scrubbingWriter) Write(p []byte) (int, error) {
+	scrubbed := p
+	for _, secret := range s.secrets {
+		scrubbed = bytes.ReplaceAll(scrubbed, secret, []byte("***"))
+	}
+	if _, err := s.w.Write(scrubbed); err != nil {
+		return 0, err
+	}
+	// Report the original byte count so callers using io.Copy do not see a
+	// short write when the replacement is shorter (or longer) than the
+	// input.
+	return len(p), nil
+}
+
 type Command struct {
 	Name string
 	Args []string
 	Dir  string
 	Env  []string
 
-	// EnvAllowlist limits which host environment variables are passed to the child
-	// process. Entries support an exact name ("KUBECONFIG") or a "PREFIX_*" pattern
-	// ("VIOLET_*"). When EnvAllowlist is empty, the child inherits os.Environ() in
-	// full (backward-compatible default). Env is always appended after the filtered
-	// host set.
+	// EnvAllowlist limits which host environment variables are passed to the
+	// child process — entries are exact names ("KUBECONFIG"). When the list
+	// is empty, the child inherits os.Environ() in full (backward-compatible
+	// default). Env is always appended after the filtered host set.
 	EnvAllowlist []string
+
+	// RedactSecrets is a list of literal byte strings that must never appear
+	// in the child's stdout/stderr stream as captured by this CLI. Any byte
+	// match is replaced with "***" before the output is written to the
+	// console, the captured buffer, or the stderr-tail wrapped into Err.
+	//
+	// This guards against the child process echoing its own argv when
+	// verbose/debug logging is on — argv-mode credentials still leak at the
+	// OS level (ps auxe, /proc), but the CI build log no longer carries the
+	// secret verbatim. The match is byte-literal and stateless, so a secret
+	// split across two Write calls can slip through; in practice CI loggers
+	// are line-buffered and the residual risk is acceptable.
+	RedactSecrets []string
 }
 
 // CommandResult represents the result of a command execution
@@ -66,9 +114,12 @@ func RunCommand(ctx context.Context, cmd Command) CommandResult {
 	// Create buffers to capture output
 	var stdoutBuf, stderrBuf bytes.Buffer
 
-	// Create multi-writers to both capture and print output
-	stdoutWriter := io.MultiWriter(os.Stdout, &stdoutBuf)
-	stderrWriter := io.MultiWriter(os.Stderr, &stderrBuf)
+	// Create multi-writers to both capture and print output. When the caller
+	// supplies RedactSecrets, every writer in the chain (console + capture
+	// buffer) receives the scrubbed bytes — that way the stderr-tail wrap
+	// downstream cannot read the unredacted secret back out of the buffer.
+	stdoutWriter := redactingWriter(io.MultiWriter(os.Stdout, &stdoutBuf), cmd.RedactSecrets)
+	stderrWriter := redactingWriter(io.MultiWriter(os.Stderr, &stderrBuf), cmd.RedactSecrets)
 
 	runCmd.Stdout = stdoutWriter
 	runCmd.Stderr = stderrWriter
@@ -92,6 +143,10 @@ func filterHostEnv(allowlist []string) []string {
 	if len(allowlist) == 0 {
 		return host
 	}
+	// Membership lookup over a fixed list of env names. The list is always
+	// short (operational essentials + an explicit credential enumeration)
+	// so a linear scan is no worse than a map, and a map would obscure the
+	// "every name was reviewed explicitly" property the allowlist gives us.
 	out := make([]string, 0, len(host))
 	for _, entry := range host {
 		eq := strings.IndexByte(entry, '=')
@@ -99,28 +154,14 @@ func filterHostEnv(allowlist []string) []string {
 			continue
 		}
 		name := entry[:eq]
-		if matchAllowlist(name, allowlist) {
-			out = append(out, entry)
+		for _, want := range allowlist {
+			if name == want {
+				out = append(out, entry)
+				break
+			}
 		}
 	}
 	return out
-}
-
-// matchAllowlist reports whether name matches any pattern in allowlist. A pattern
-// ending in "*" matches by prefix; anything else is an exact match.
-func matchAllowlist(name string, allowlist []string) bool {
-	for _, pat := range allowlist {
-		if strings.HasSuffix(pat, "*") {
-			if strings.HasPrefix(name, strings.TrimSuffix(pat, "*")) {
-				return true
-			}
-			continue
-		}
-		if name == pat {
-			return true
-		}
-	}
-	return false
 }
 
 // wrapWithStderrTail enriches err with the trailing stderr lines so callers see

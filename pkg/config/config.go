@@ -96,13 +96,6 @@ type VioletConfig struct {
 	// "updated successfully" while the CRs never appear in the cluster the
 	// upgrade CLI is watching.
 	Clusters string `yaml:"clusters,omitempty"`
-
-	// Force defaults to true. Without --force violet aborts AV upserts with
-	// "already exist, skip it" — verified on tektoncd-operator v4.0.17 on
-	// 40-devops: the same input that succeeded with --force was a no-op
-	// without it, leaving wait AV Present to time out. Pointer so users can
-	// opt out (e.g. when a stale AV must be preserved exactly).
-	Force *bool `yaml:"force,omitempty"`
 }
 
 // UpgradePath represents a single upgrade path
@@ -192,10 +185,6 @@ func defaultConfig(config *Config) *Config {
 		if v.SkipPush == nil {
 			t := true
 			v.SkipPush = &t
-		}
-		if v.Force == nil {
-			t := true
-			v.Force = &t
 		}
 	}
 

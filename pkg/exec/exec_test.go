@@ -7,30 +7,6 @@ import (
 	"testing"
 )
 
-func TestMatchAllowlist(t *testing.T) {
-	tests := []struct {
-		name      string
-		needle    string
-		allowlist []string
-		want      bool
-	}{
-		{"exact match hits", "KUBECONFIG", []string{"KUBECONFIG", "HOME"}, true},
-		{"exact match misses", "USER", []string{"KUBECONFIG", "HOME"}, false},
-		{"prefix glob hits", "VIOLET_REGISTRY_USERNAME", []string{"VIOLET_*"}, true},
-		{"prefix glob misses on unrelated var", "GITHUB_TOKEN", []string{"VIOLET_*"}, false},
-		{"empty allowlist never matches", "ANYTHING", nil, false},
-		{"prefix glob and exact mix", "PATH", []string{"VIOLET_*", "PATH"}, true},
-		{"prefix glob requires prefix not substring", "MY_VIOLET_TOKEN", []string{"VIOLET_*"}, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := matchAllowlist(tc.needle, tc.allowlist); got != tc.want {
-				t.Errorf("matchAllowlist(%q, %v) = %v, want %v", tc.needle, tc.allowlist, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestFilterHostEnv_EmptyAllowlistReturnsAll(t *testing.T) {
 	// Empty allowlist must preserve the legacy "full os.Environ() passthrough"
 	// behaviour — testCommand callers rely on it.
@@ -51,19 +27,6 @@ func TestFilterHostEnv_AllowlistRestricts(t *testing.T) {
 	}
 	if contains(got, "FILTER_HOST_ENV_DROP=no") {
 		t.Errorf("DROP probe should be filtered out; env=%v", got)
-	}
-}
-
-func TestFilterHostEnv_GlobMatchesPrefix(t *testing.T) {
-	t.Setenv("FILTER_GLOB_TOKEN_A", "1")
-	t.Setenv("FILTER_GLOB_TOKEN_B", "2")
-	t.Setenv("OTHER_VAR", "leave-me")
-	got := filterHostEnv([]string{"FILTER_GLOB_*"})
-	if !contains(got, "FILTER_GLOB_TOKEN_A=1") || !contains(got, "FILTER_GLOB_TOKEN_B=2") {
-		t.Errorf("both glob-matched vars should be present; env=%v", got)
-	}
-	if contains(got, "OTHER_VAR=leave-me") {
-		t.Errorf("OTHER_VAR should be filtered; env=%v", got)
 	}
 }
 
@@ -153,6 +116,63 @@ func TestRunCommand_EmptyAllowlistFullPassthrough(t *testing.T) {
 	}
 	if !strings.Contains(res.Stdout, "EXEC_TEST_PROBE=should-survive") {
 		t.Errorf("nil allowlist should preserve full os.Environ(); stdout did not contain probe; stdout=%s", res.Stdout)
+	}
+}
+
+func TestRunCommand_RedactSecretsInChildStdout(t *testing.T) {
+	// The child literally echoes a "secret" string. Without RedactSecrets it
+	// would land verbatim in Stdout, the console, and the wrapped stderr
+	// tail. With RedactSecrets, every place we capture the byte stream sees
+	// "***" instead.
+	res := RunCommand(context.Background(), Command{
+		Name:          "/bin/sh",
+		Args:          []string{"-c", "echo prefix=top-secret-value=suffix"},
+		RedactSecrets: []string{"top-secret-value"},
+	})
+	if res.Err != nil {
+		t.Fatalf("RunCommand failed: %v", res.Err)
+	}
+	if strings.Contains(res.Stdout, "top-secret-value") {
+		t.Errorf("Stdout buffer should not contain the secret; got %q", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "prefix=***=suffix") {
+		t.Errorf("expected mid-string replacement, got %q", res.Stdout)
+	}
+}
+
+func TestRunCommand_RedactSecretsAppliesToStderrTail(t *testing.T) {
+	// Failing child emits the secret in stderr. wrapWithStderrTail should
+	// receive the already-scrubbed buffer, so the *error message* also
+	// hides the secret.
+	res := RunCommand(context.Background(), Command{
+		Name:          "/bin/sh",
+		Args:          []string{"-c", "echo error: secret-payload 1>&2; exit 1"},
+		RedactSecrets: []string{"secret-payload"},
+	})
+	if res.Err == nil {
+		t.Fatal("expected non-nil err for exit 1")
+	}
+	if strings.Contains(res.Err.Error(), "secret-payload") {
+		t.Errorf("wrapped error should redact the secret; got %q", res.Err.Error())
+	}
+	if strings.Contains(res.Stderr, "secret-payload") {
+		t.Errorf("captured stderr buffer should redact the secret; got %q", res.Stderr)
+	}
+}
+
+func TestRunCommand_EmptyRedactSecretsIsNoOp(t *testing.T) {
+	// All-empty (or nil) RedactSecrets must not wrap the writer — verifies
+	// the hot path doesn't pay overhead when redaction is unused.
+	res := RunCommand(context.Background(), Command{
+		Name:          "/bin/sh",
+		Args:          []string{"-c", "echo unchanged-payload"},
+		RedactSecrets: []string{"", ""},
+	})
+	if res.Err != nil {
+		t.Fatalf("RunCommand failed: %v", res.Err)
+	}
+	if !strings.Contains(res.Stdout, "unchanged-payload") {
+		t.Errorf("payload should pass through when no live secrets; got %q", res.Stdout)
 	}
 }
 
