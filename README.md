@@ -91,9 +91,12 @@ operatorConfig:
   name: gitlab-ce-operator # operator 名称
   violet: # 必填：上架走外部 violet 二进制
     packagePrefix: http://package-minio.alauda.cn:9199/packages/ # 必填，无默认值
-    # bin: /usr/local/bin/violet # 可选；为空则在 $PATH 查 `violet`
-    # skipPush: true             # 默认 true；私有 registry 场景置 false
-    # pushArgs:                  # 私有场景透传给 `violet push` 的额外参数
+    platformAddress: https://my-acp.example.com  # 必填：ACP 平台 URL
+    clusters: devops                              # 写入的目标子集群名；默认 "global"，多集群部署必填
+    # bin: /usr/local/bin/violet  # 可选；为空则在 $PATH 查 `violet`
+    # skipPush: true              # 默认 true；私有 registry 场景置 false
+    # force: true                 # 默认 true；不开 violet 会误判 "already exist, skip" 导致 wait 超时
+    # pushArgs:                   # 私有场景透传给 `violet push` 的额外参数
     #   - --dest-repo
     #   - registry.private/devops
     #   - --plain
@@ -183,17 +186,26 @@ upgrade CLI 把 `Artifact` / `ArtifactVersion` CR 的创建步骤外包给 `viol
 
 upgrade CLI 调用 violet 时**只透传**以下宿主环境变量：`KUBECONFIG`、`PATH`、`HOME`、`USER`、`VIOLET_*` 前缀。CI runner 上其他 secret（`GITHUB_TOKEN` / `AWS_*` / 等）不会进入 violet 子进程，符合最小权限原则。
 
-### registry 凭证（仅 `skipPush: false` 场景需要）
+### 凭证（两套环境变量）
 
-私有 registry 推送镜像时 `violet push` 需要 `--username` / `--password`。**不要写进 config.yaml**，改用环境变量：
+`violet push` 涉及两类凭证，**都不写进 config.yaml**，改用环境变量：
+
+| 用途 | 环境变量 | 注入的 violet 参数 | 何时需要 |
+|------|----------|-------------------|----------|
+| 登录 ACP 平台创建 Artifact/AV CR | `VIOLET_PLATFORM_USERNAME` / `VIOLET_PLATFORM_PASSWORD` | `--platform-username` / `--platform-password` | **真实集群必填**（violet 拒绝无凭证启动） |
+| 推送镜像到私有 registry | `VIOLET_REGISTRY_USERNAME` / `VIOLET_REGISTRY_PASSWORD` | `--username` / `--password` | 仅 `skipPush: false` 私有场景 |
 
 ```sh
-export VIOLET_REGISTRY_USERNAME=<user>
-export VIOLET_REGISTRY_PASSWORD=<password>
+export VIOLET_PLATFORM_USERNAME=admin@cpaas.io
+export VIOLET_PLATFORM_PASSWORD=<password>
+# 仅私有 push 场景需要的额外两行:
+# export VIOLET_REGISTRY_USERNAME=<user>
+# export VIOLET_REGISTRY_PASSWORD=<password>
+
 ./upgrade --config upgrade.yaml
 ```
 
-upgrade CLI 检测到非空时会自动追加到 `violet push` 的 argv，并在日志渲染时把 `--password` 之后的值替换成 `***`。
+upgrade CLI 检测到非空时自动追加到 `violet push` 的 argv，日志渲染时把 `--password` 和 `--platform-password` 之后的值替换成 `***`。
 
 ⚠️ **共享 CI runner 安全警告**：当前 violet 不支持 stdin / 文件方式读凭证，`--password` 只能进 argv。OS 级 `ps auxe` / `/proc/<pid>/cmdline` / `strace` 都能看到明文密码。**多租户共享 runner 上禁用 `skipPush: false`**，私有 push 场景务必使用独占的 pipeline runner / 独占的 OS 用户账号。
 

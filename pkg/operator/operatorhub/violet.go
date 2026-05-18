@@ -26,19 +26,36 @@ import (
 // Environment variables consumed when assembling `violet push`. They are
 // intentionally not part of OperatorConfig: pipelines inject them as secrets
 // and the upgrade CLI must not persist them to disk or echo them back.
+// VIOLET_REGISTRY_* covers --skip-push=false push-to-registry flow;
+// VIOLET_PLATFORM_* covers ACP API authentication for AV creation.
 const (
 	EnvVioletRegistryUsername = "VIOLET_REGISTRY_USERNAME"
 	EnvVioletRegistryPassword = "VIOLET_REGISTRY_PASSWORD"
+	EnvVioletPlatformUsername = "VIOLET_PLATFORM_USERNAME"
+	EnvVioletPlatformPassword = "VIOLET_PLATFORM_PASSWORD"
 )
 
 // violet CLI flag names. Kept private so the consuming code stays expressive
 // (`flagSkipPush` rather than the raw string everywhere).
 const (
 	flagSkipPush            = "--skip-push"
+	flagForce               = "--force"
 	flagTargetCatalogSource = "--target-catalog-source"
+	flagClusters            = "--clusters"
 	flagUsername            = "--username"
 	flagPassword            = "--password"
+	flagPlatformAddress     = "--platform-address"
+	flagPlatformUsername    = "--platform-username"
+	flagPlatformPassword    = "--platform-password"
 )
+
+// sensitivePasswordFlags lists every violet flag whose immediately following
+// argv token is a credential — MaskCommand redacts each of them in logs.
+// argv-mode leakage to OS (ps auxe / /proc) remains as documented in the README.
+var sensitivePasswordFlags = map[string]bool{
+	flagPassword:         true,
+	flagPlatformPassword: true,
+}
 
 // BuildPackageURL composes the .tgz URL by the agreed MinIO convention:
 //
@@ -62,39 +79,68 @@ func BuildPackageURL(prefix, name, channel, bundleVersion string) (string, error
 	return fmt.Sprintf("%s/%s/%s/%s.latest.ALL.%s.tgz", p, name, channel, name, bundleVersion), nil
 }
 
+// VioletPushParams is the resolved, pointer-free shape of `violet push`
+// inputs. The caller (execVioletPush) is responsible for dereferencing the
+// *bool defaults in config.VioletConfig before populating this struct, so
+// BuildVioletPushArgs remains a pure transform — it never touches the
+// filesystem, never starts a process, and never reaches into config.
+type VioletPushParams struct {
+	TgzPath         string
+	SkipPush        bool
+	Force           bool
+	PlatformAddress string
+	Clusters        string
+	PushArgs        []string
+}
+
 // BuildVioletPushArgs assembles the argv for `violet push <tgz>`. Credentials
-// are read from EnvVioletRegistryUsername / EnvVioletRegistryPassword and
-// injected as --username / --password when non-empty; pushArgs is appended
-// verbatim. The function is a pure transform — it never touches the filesystem
-// or starts a process — so callers can table-test the exact argv shape.
+// are read from environment variables and injected when non-empty:
 //
-// The decision of skipPush belongs to the caller (it has already deferenced
-// VioletConfig.SkipPush and applied the "nil == true" default in config), so
-// this function takes a plain bool.
-func BuildVioletPushArgs(tgzPath string, skipPush bool, pushArgs []string) []string {
-	args := []string{"push", tgzPath, flagTargetCatalogSource, targetCatalogSource}
-	if skipPush {
+//	VIOLET_REGISTRY_USERNAME / _PASSWORD → --username / --password
+//	VIOLET_PLATFORM_USERNAME / _PASSWORD → --platform-username / --platform-password
+//
+// PushArgs is appended verbatim so unsupported flags can still be threaded
+// through without a code change.
+func BuildVioletPushArgs(p VioletPushParams) []string {
+	args := []string{"push", p.TgzPath, flagTargetCatalogSource, targetCatalogSource}
+	if p.SkipPush {
 		args = append(args, flagSkipPush)
+	}
+	if p.Force {
+		args = append(args, flagForce)
+	}
+	if p.PlatformAddress != "" {
+		args = append(args, flagPlatformAddress, p.PlatformAddress)
+	}
+	if p.Clusters != "" {
+		args = append(args, flagClusters, p.Clusters)
 	}
 	if u := os.Getenv(EnvVioletRegistryUsername); u != "" {
 		args = append(args, flagUsername, u)
 	}
-	if p := os.Getenv(EnvVioletRegistryPassword); p != "" {
-		args = append(args, flagPassword, p)
+	if p2 := os.Getenv(EnvVioletRegistryPassword); p2 != "" {
+		args = append(args, flagPassword, p2)
 	}
-	args = append(args, pushArgs...)
+	if u := os.Getenv(EnvVioletPlatformUsername); u != "" {
+		args = append(args, flagPlatformUsername, u)
+	}
+	if p2 := os.Getenv(EnvVioletPlatformPassword); p2 != "" {
+		args = append(args, flagPlatformPassword, p2)
+	}
+	args = append(args, p.PushArgs...)
 	return args
 }
 
 // MaskCommand renders the command for logging, replacing the token following
-// --password with `***`. This only protects log output — the credential is
-// still visible to OS-level inspection (e.g. `ps auxe`) once the child process
-// runs. The README must document that risk for shared CI runners.
+// any sensitive-password flag (--password, --platform-password) with `***`.
+// This only protects log output — the credential is still visible to OS-level
+// inspection (e.g. `ps auxe`) once the child process runs. The README
+// documents that risk for shared CI runners.
 func MaskCommand(name string, args []string) string {
 	parts := make([]string, 0, len(args)+1)
 	parts = append(parts, name)
 	for i := 0; i < len(args); i++ {
-		if args[i] == flagPassword && i+1 < len(args) {
+		if sensitivePasswordFlags[args[i]] && i+1 < len(args) {
 			parts = append(parts, args[i], "***")
 			i++
 			continue
@@ -319,8 +365,9 @@ var violetEnvAllowlist = []string{
 }
 
 // execVioletPush runs `violet push <tgz>` as a child process. Credentials
-// from VIOLET_REGISTRY_USERNAME / _PASSWORD are auto-injected into argv by
-// BuildVioletPushArgs; the rendered command is mask-logged before exec.
+// for the registry (VIOLET_REGISTRY_*) and ACP platform (VIOLET_PLATFORM_*)
+// are auto-injected into argv by BuildVioletPushArgs; the rendered command
+// is mask-logged before exec.
 func (o *Operator) execVioletPush(ctx context.Context, tgzPath string) error {
 	log := logging.FromContext(ctx)
 
@@ -331,11 +378,14 @@ func (o *Operator) execVioletPush(ctx context.Context, tgzPath string) error {
 		return err
 	}
 
-	skipPush := true
-	if o.violet.SkipPush != nil {
-		skipPush = *o.violet.SkipPush
-	}
-	args := BuildVioletPushArgs(tgzPath, skipPush, o.violet.PushArgs)
+	args := BuildVioletPushArgs(VioletPushParams{
+		TgzPath:         tgzPath,
+		SkipPush:        derefBoolDefault(o.violet.SkipPush, true),
+		Force:           derefBoolDefault(o.violet.Force, true),
+		PlatformAddress: o.violet.PlatformAddress,
+		Clusters:        o.violet.Clusters,
+		PushArgs:        o.violet.PushArgs,
+	})
 
 	log.Infow("invoking violet", "cmd", MaskCommand(bin, args))
 
@@ -345,6 +395,16 @@ func (o *Operator) execVioletPush(ctx context.Context, tgzPath string) error {
 		EnvAllowlist: violetEnvAllowlist,
 	})
 	return result.Err
+}
+
+// derefBoolDefault returns *p when p is non-nil, otherwise the supplied
+// default. Used to apply VioletConfig's "unset means on" semantics for
+// SkipPush and Force at the call site of BuildVioletPushArgs.
+func derefBoolDefault(p *bool, fallback bool) bool {
+	if p == nil {
+		return fallback
+	}
+	return *p
 }
 
 // validateVioletBin guards against accidentally executing a binary at an

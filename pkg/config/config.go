@@ -77,10 +77,32 @@ type VioletConfig struct {
 	SkipPush *bool `yaml:"skipPush,omitempty"`
 
 	// PushArgs are extra arguments appended verbatim to `violet push`, used to
-	// inject options such as --dest-repo, --plain, --image-pull-secret, --force
+	// inject options such as --dest-repo, --plain, --image-pull-secret
 	// in private-registry scenarios. Credentials must come from environment
-	// variables (VIOLET_REGISTRY_USERNAME / VIOLET_REGISTRY_PASSWORD), not here.
+	// variables (VIOLET_REGISTRY_USERNAME / VIOLET_REGISTRY_PASSWORD,
+	// VIOLET_PLATFORM_USERNAME / VIOLET_PLATFORM_PASSWORD), not here.
 	PushArgs []string `yaml:"pushArgs,omitempty"`
+
+	// PlatformAddress is the ACP platform URL violet authenticates against
+	// (e.g. https://devops-env1-hcvt43--idp.alaudatech.net). Required in
+	// real-cluster integrations — violet refuses to start without it. Not a
+	// credential so it lives in config rather than env.
+	PlatformAddress string `yaml:"platformAddress,omitempty"`
+
+	// Clusters names the target subcluster(s) for the Artifact/AV write —
+	// violet defaults to "global", but multi-cluster ACP deployments expose
+	// a per-workload subcluster (e.g. "devops") that kubectl is also pointed
+	// at. A mismatch silently writes to the wrong place: violet reports
+	// "updated successfully" while the CRs never appear in the cluster the
+	// upgrade CLI is watching.
+	Clusters string `yaml:"clusters,omitempty"`
+
+	// Force defaults to true. Without --force violet aborts AV upserts with
+	// "already exist, skip it" — verified on tektoncd-operator v4.0.17 on
+	// 40-devops: the same input that succeeded with --force was a no-op
+	// without it, leaving wait AV Present to time out. Pointer so users can
+	// opt out (e.g. when a stale AV must be preserved exactly).
+	Force *bool `yaml:"force,omitempty"`
 }
 
 // UpgradePath represents a single upgrade path
@@ -170,6 +192,10 @@ func defaultConfig(config *Config) *Config {
 		if v.SkipPush == nil {
 			t := true
 			v.SkipPush = &t
+		}
+		if v.Force == nil {
+			t := true
+			v.Force = &t
 		}
 	}
 

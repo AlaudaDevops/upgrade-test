@@ -61,7 +61,9 @@ Artifact 名称约定：未显式给 `artifact` 字段时，自动拼成 `<artif
 - **轮询用 `wait.PollUntilContextTimeout`** —— 间隔/超时都从 `OperatorConfig.Interval` / `Timeout` 拿，不要写常量。
 - **日志走 knative `logging.FromContext(ctx)`** —— `cmd/upgrade_command.go` 在 ctx 上注入了 zap sugar logger，子包不要再自己起 logger。
 - **YAML 字段大小写**：`config.go` 用的是 `yaml:"xxx,omitempty"` 小写驼峰（`operatorConfig`、`upgradePaths`、`bundleVersion`、`violet`），demo 配置与 README 也是这套；改字段时同步改三处。
-- **registry 凭证不进 config** —— `VIOLET_REGISTRY_USERNAME` / `VIOLET_REGISTRY_PASSWORD` 必须走环境变量，由 `BuildVioletPushArgs` 自动追加进 violet argv。日志层 mask `--password` 后的值。`pkg/exec.Command.EnvAllowlist` 限制子进程 env 范围，调 violet 时只透传 `KUBECONFIG` / `PATH` / `HOME` / `USER` / `VIOLET_*`。
+- **凭证不进 config（两套都不进）** —— platform 凭证 `VIOLET_PLATFORM_USERNAME` / `VIOLET_PLATFORM_PASSWORD` 和 registry 凭证 `VIOLET_REGISTRY_USERNAME` / `VIOLET_REGISTRY_PASSWORD` 必须走环境变量，由 `BuildVioletPushArgs` 自动追加进 violet argv。日志层 mask `--password` 和 `--platform-password` 后的值（`sensitivePasswordFlags` map）。`pkg/exec.Command.EnvAllowlist` 限制子进程 env 范围，调 violet 时只透传 `KUBECONFIG` / `PATH` / `HOME` / `USER` / `VIOLET_*`。
+- **`Violet.Force` 默认 true** —— 验证过 violet 无 `--force` 时会误判 "already exist, skip it" 然后什么都不做，导致 wait AV Present 超时。用户显式置 false 才关闭。
+- **`Violet.Clusters` 多集群必填** —— violet 默认写 `global` 子集群，跟 kubectl 实际连的子集群（如 `/kubernetes/devops`）可能不一致；不填会出现 "violet 报 success 但 AV 在 kubectl 看不到" 的静默假成功。
 - **`packagePrefix` 是必填字段，无默认值** —— MinIO 根地址跨环境不同，CLI 拒绝硬编码任何默认。空值会在 `BuildPackageURL` 阶段返回 "packagePrefix is empty" 错误。
 
 ## PR / 协作流程

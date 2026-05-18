@@ -104,53 +104,92 @@ func TestBuildPackageURL(t *testing.T) {
 func TestBuildVioletPushArgs(t *testing.T) {
 	tests := []struct {
 		name     string
-		skipPush bool
-		pushArgs []string
-		envUser  string
-		envPass  string
+		params   VioletPushParams
+		regUser  string
+		regPass  string
+		platUser string
+		platPass string
 		want     []string
 	}{
 		{
-			name:     "skip-push only, no creds, no extra args",
-			skipPush: true,
-			want:     []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push"},
+			name:   "minimal: skip-push + force defaults are explicit",
+			params: VioletPushParams{TgzPath: "/tmp/x.tgz", SkipPush: true, Force: true},
+			want:   []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push", "--force"},
 		},
 		{
-			name: "skip-push false drops the flag",
-			want: []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform"},
+			name:   "force=false drops the flag",
+			params: VioletPushParams{TgzPath: "/tmp/x.tgz", SkipPush: true, Force: false},
+			want:   []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push"},
 		},
 		{
-			name:     "env creds appended after skip-push",
-			skipPush: true,
-			envUser:  "u",
-			envPass:  "p",
-			want:     []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push", "--username", "u", "--password", "p"},
+			name:   "skip-push=false drops the flag (push images path)",
+			params: VioletPushParams{TgzPath: "/tmp/x.tgz", SkipPush: false, Force: true},
+			want:   []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--force"},
 		},
 		{
-			name:    "only username present (rare, but accepted)",
-			envUser: "u",
-			want:    []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--username", "u"},
+			name:   "platform-address surfaces between force and creds",
+			params: VioletPushParams{TgzPath: "/tmp/x.tgz", SkipPush: true, Force: true, PlatformAddress: "https://example.acp"},
+			want:   []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push", "--force", "--platform-address", "https://example.acp"},
 		},
 		{
-			name:     "private-push flow: skip-push=false + pushArgs",
-			pushArgs: []string{"--dest-repo", "registry.private/devops", "--plain", "--force"},
-			want:     []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--dest-repo", "registry.private/devops", "--plain", "--force"},
+			name:   "clusters list lands after platform-address",
+			params: VioletPushParams{TgzPath: "/tmp/x.tgz", SkipPush: true, Force: true, PlatformAddress: "https://x", Clusters: "devops"},
+			want:   []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push", "--force", "--platform-address", "https://x", "--clusters", "devops"},
 		},
 		{
-			name:     "push args land after credentials",
-			skipPush: true,
-			envUser:  "u",
-			envPass:  "p",
-			pushArgs: []string{"--force"},
-			want:     []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push", "--username", "u", "--password", "p", "--force"},
+			name:    "registry creds env auto-injected as --username/--password",
+			params:  VioletPushParams{TgzPath: "/tmp/x.tgz", SkipPush: true, Force: true},
+			regUser: "u",
+			regPass: "p",
+			want:    []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push", "--force", "--username", "u", "--password", "p"},
+		},
+		{
+			name:     "platform creds env auto-injected as --platform-username/--platform-password",
+			params:   VioletPushParams{TgzPath: "/tmp/x.tgz", SkipPush: true, Force: true},
+			platUser: "admin@cpaas.io",
+			platPass: "07Apples@",
+			want:     []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push", "--force", "--platform-username", "admin@cpaas.io", "--platform-password", "07Apples@"},
+		},
+		{
+			name: "full real-cluster shape: address + clusters + both creds + push-args",
+			params: VioletPushParams{
+				TgzPath: "/tmp/x.tgz", SkipPush: false, Force: true,
+				PlatformAddress: "https://40-devops",
+				Clusters:        "devops",
+				PushArgs:        []string{"--dest-repo", "registry.private/devops"},
+			},
+			regUser: "r-u", regPass: "r-p",
+			platUser: "p-u", platPass: "p-p",
+			want: []string{
+				"push", "/tmp/x.tgz", "--target-catalog-source", "platform",
+				"--force",
+				"--platform-address", "https://40-devops",
+				"--clusters", "devops",
+				"--username", "r-u", "--password", "r-p",
+				"--platform-username", "p-u", "--platform-password", "p-p",
+				"--dest-repo", "registry.private/devops",
+			},
+		},
+		{
+			name:    "only registry username present (no password) still injects",
+			params:  VioletPushParams{TgzPath: "/tmp/x.tgz", SkipPush: true, Force: true},
+			regUser: "u",
+			want:    []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push", "--force", "--username", "u"},
+		},
+		{
+			name:   "pushArgs always land last so user overrides win",
+			params: VioletPushParams{TgzPath: "/tmp/x.tgz", SkipPush: true, Force: true, PushArgs: []string{"--plain", "--image-pull-secret", "pull"}},
+			want:   []string{"push", "/tmp/x.tgz", "--target-catalog-source", "platform", "--skip-push", "--force", "--plain", "--image-pull-secret", "pull"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(EnvVioletRegistryUsername, tc.envUser)
-			t.Setenv(EnvVioletRegistryPassword, tc.envPass)
-			got := BuildVioletPushArgs("/tmp/x.tgz", tc.skipPush, tc.pushArgs)
+			t.Setenv(EnvVioletRegistryUsername, tc.regUser)
+			t.Setenv(EnvVioletRegistryPassword, tc.regPass)
+			t.Setenv(EnvVioletPlatformUsername, tc.platUser)
+			t.Setenv(EnvVioletPlatformPassword, tc.platPass)
+			got := BuildVioletPushArgs(tc.params)
 			if !stringSliceEqual(got, tc.want) {
 				t.Errorf("args mismatch:\n got: %v\nwant: %v", got, tc.want)
 			}
@@ -183,6 +222,16 @@ func TestMaskCommand(t *testing.T) {
 			name: "multiple --password occurrences each get masked",
 			in:   []string{"--password", "a", "--password", "b"},
 			want: "violet --password *** --password ***",
+		},
+		{
+			name: "--platform-password value masked too",
+			in:   []string{"--platform-username", "admin@cpaas.io", "--platform-password", "07Apples@"},
+			want: "violet --platform-username admin@cpaas.io --platform-password ***",
+		},
+		{
+			name: "both --password and --platform-password masked in one command",
+			in:   []string{"--username", "u", "--password", "rp", "--platform-username", "pu", "--platform-password", "pp"},
+			want: "violet --username u --password *** --platform-username pu --platform-password ***",
 		},
 	}
 
