@@ -65,7 +65,10 @@ type VioletConfig struct {
 	Bin string `yaml:"bin,omitempty"`
 
 	// PackagePrefix is the MinIO (or HTTP) root from which the per-version
-	// .tgz is downloaded. Default: "http://package-minio.alauda.cn:9199/packages/".
+	// .tgz is downloaded. Required when Violet is configured — the prefix
+	// varies across environments (private vs shared MinIO, regional mirrors)
+	// so the CLI deliberately refuses to hardcode a default. Empty prefix
+	// surfaces as a "packagePrefix is empty" error at URL build time.
 	PackagePrefix string `yaml:"packagePrefix,omitempty"`
 
 	// SkipPush controls whether `--skip-push` is passed to `violet push`.
@@ -106,10 +109,6 @@ type Version struct {
 	ExpectedSha256 string `yaml:"expectedSha256,omitempty"`
 }
 
-// DefaultVioletPackagePrefix is the MinIO root used when OperatorConfig.Violet
-// is configured but its PackagePrefix is left blank.
-const DefaultVioletPackagePrefix = "http://package-minio.alauda.cn:9199/packages/"
-
 // LoadConfig loads the configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -146,9 +145,6 @@ func defaultConfig(config *Config) *Config {
 	}
 
 	if v := config.OperatorConfig.Violet; v != nil {
-		if v.PackagePrefix == "" {
-			v.PackagePrefix = DefaultVioletPackagePrefix
-		}
 		if v.SkipPush == nil {
 			t := true
 			v.SkipPush = &t
