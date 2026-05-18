@@ -148,7 +148,7 @@ func (o *Operator) installViaViolet(ctx context.Context, version config.Version)
 		return nil, "", fmt.Errorf("get artifact %s: %w", o.artifact, err)
 	}
 
-	url, err := BuildPackageURL(o.violet.PackagePrefix, o.name, version.Channel, version.BundleVersion)
+	url, err := BuildPackageURL(o.violet.PackagePrefix, o.name, version.EffectivePackageChannel(), version.BundleVersion)
 	if err != nil {
 		return nil, "", fmt.Errorf("build package url: %w", err)
 	}

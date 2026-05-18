@@ -101,12 +101,34 @@ type Version struct {
 	TestCommand string `yaml:"testCommand,omitempty"`
 	// testSubPath is the path to the test sub-directory, default is "testing"
 	TestSubPath string `yaml:"testSubPath,omitempty"`
-	// revision is the revision to use for the version
+	// Channel is the OLM Subscription channel (e.g. "stable",
+	// "pipelines-4.0", "latest"). Used verbatim as Subscription.spec.channel
+	// when InstallSubscription installs the operator.
 	Channel string `yaml:"channel,omitempty"`
+	// PackageChannel is the MinIO repository path segment used by the violet
+	// download URL — it is NOT the same as the OLM Channel. For example, on
+	// the platform-tektoncd-operator the OLM channel is "stable" but the
+	// MinIO segment is "v4.0" / "v4.2" / "rc" / etc.
+	//
+	// When empty, BuildPackageURL falls back to Channel for backward
+	// compatibility with repositories where the two coincide. Set this
+	// explicitly when the two differ.
+	PackageChannel string `yaml:"packageChannel,omitempty"`
 	// ExpectedSha256, when non-empty, is the lowercase hex SHA-256 of the
 	// downloaded .tgz. The upgrade CLI verifies the digest after download and
 	// fails fast on mismatch. Optional; leave empty to skip verification.
 	ExpectedSha256 string `yaml:"expectedSha256,omitempty"`
+}
+
+// EffectivePackageChannel returns the MinIO URL segment to use for this
+// version: PackageChannel when set, falling back to Channel when not. This
+// keeps simple cases (where OLM channel name == MinIO segment) ergonomic
+// while still letting callers split the two when they diverge.
+func (v Version) EffectivePackageChannel() string {
+	if v.PackageChannel != "" {
+		return v.PackageChannel
+	}
+	return v.Channel
 }
 
 // LoadConfig loads the configuration from a YAML file

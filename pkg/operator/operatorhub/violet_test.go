@@ -12,12 +12,35 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AlaudaDevops/upgrade-test/pkg/config"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
 )
+
+func TestVersionEffectivePackageChannel(t *testing.T) {
+	tests := []struct {
+		name           string
+		channel        string
+		packageChannel string
+		want           string
+	}{
+		{"packageChannel wins when set", "stable", "v4.0", "v4.0"},
+		{"falls back to channel when packageChannel empty", "stable", "", "stable"},
+		{"both empty returns empty (caller fails loudly downstream)", "", "", ""},
+		{"different segments stay independent", "pipelines-4.6", "rc", "rc"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v := config.Version{Channel: tc.channel, PackageChannel: tc.packageChannel}
+			if got := v.EffectivePackageChannel(); got != tc.want {
+				t.Errorf("EffectivePackageChannel() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestBuildPackageURL(t *testing.T) {
 	tests := []struct {

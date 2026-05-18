@@ -106,8 +106,9 @@ upgradePaths: # 定义升级路径，可以包含多个
         testCommand: |
           TAGS=@prepare-17.8 GODOG_ARGS="--godog.format=allure" make test
         bundleVersion: v17.8.10
-        channel: stable
-        # expectedSha256: a3f...   # 可选；非空时强制校验下载的 .tgz
+        channel: stable          # OLM Subscription.spec.channel
+        # packageChannel: v17    # MinIO URL 段；与 OLM channel 不同时填，省略则 fallback 到 channel
+        # expectedSha256: a3f... # 可选；非空时强制校验下载的 .tgz
       - name: v17.11 # 版本名称
         testCommand: |
           TAGS=@upgrade-17.11 GODOG_ARGS="--godog.format=allure --bdd.cleanup=false" make test
@@ -119,7 +120,7 @@ upgradePaths: # 定义升级路径，可以包含多个
 
 - **`operatorConfig.violet` 必填**。upgrade CLI 不再在 Go 代码里直接创建 `Artifact`/`ArtifactVersion` CR，而是把这步外包给 `violet` 二进制。`operatorConfig.violet` 为空时 `InstallArtifactVersion` 会立即返回配置错误。
 - **`packagePrefix` 没有默认值**。MinIO 根地址跨环境（私有 / 共享 / 区域镜像）不同，CLI 拒绝硬编码任何值。
-- **`.tgz` URL 拼接约定**：`<prefix>/<name>/<channel>/<name>.latest.ALL.<bundleVersion>.tgz`。已验证可同时覆盖 `v4.6` 大版本通道和 `rc` 滚动通道两种实际形态。
+- **`.tgz` URL 拼接约定**：`<prefix>/<name>/<packageChannel>/<name>.latest.ALL.<bundleVersion>.tgz`。`packageChannel` 是 MinIO 仓库的路径段（如 `v4.0` / `v4.6` / `rc`），**与 OLM Subscription 的 `channel`（如 `stable` / `pipelines-4.0`）不是同一个概念**。当两者字面相同时（少数情况）可只填 `channel`，CLI 会自动 fallback；当两者不同（tektoncd 这类）必须显式填 `packageChannel`。
 - **`expectedSha256` 强烈建议为外网下载场景填上**。HTTP 明文 + DNS 投毒可能注入恶意 tgz，违 violet 会带集群凭证把恶意 bundle 上架——内网 MinIO 也建议加防。
 
 ### 构建测试镜像
