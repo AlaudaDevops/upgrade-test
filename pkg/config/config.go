@@ -3,6 +3,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"time"
 
@@ -176,7 +177,11 @@ func (v Version) EffectivePackageChannel() string {
 	return v.Channel
 }
 
-// LoadConfig loads the configuration from a YAML file
+// LoadConfig loads the configuration from a YAML file, fills defaults, and
+// validates that the result is internally consistent. Validation runs after
+// defaulting so it sees the same shape the runtime will use — e.g. an empty
+// OperatorConfig.Type already resolves to "operatorhub" by the time we
+// check whether per-version Channel fields are required.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -188,7 +193,38 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
-	return defaultConfig(&config), nil
+	cfg := defaultConfig(&config)
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// validateConfig fails fast on shape errors that would otherwise only surface
+// mid-upgrade (e.g. when path 2 step 3 happens to need the missing field).
+// Catching them at load time avoids partially-completed upgrades that leave
+// the cluster in an awkward state.
+//
+// Today this only enforces "Channel is required for operatorhub-type runs",
+// but it is the right home for future cross-field checks (e.g. violet.bin
+// existence, bundleVersion uniqueness within a path).
+func validateConfig(cfg *Config) error {
+	// Channel feeds both the MinIO download URL (BuildPackageURL refuses an
+	// empty channel) and Subscription.spec.channel (no safe fallback — a
+	// silent "stable" default would install the wrong CSV stream on a typo).
+	// The local operator type runs `make deploy` and never reads Channel, so
+	// the requirement is gated on Type to avoid forcing irrelevant fields on
+	// local-dev configs.
+	if cfg.OperatorConfig.Type == "operatorhub" {
+		for i, path := range cfg.UpgradePaths {
+			for j, v := range path.Versions {
+				if v.Channel == "" {
+					return fmt.Errorf("upgradePaths[%d].versions[%d] (%q): channel is required for operatorhub type", i, j, v.Name)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func defaultConfig(config *Config) *Config {

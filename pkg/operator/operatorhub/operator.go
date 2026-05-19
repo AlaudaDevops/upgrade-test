@@ -107,14 +107,8 @@ func (o *Operator) GetResource(ctx context.Context, name, namespace string, gvr 
 }
 
 func (o *Operator) UpgradeOperator(ctx context.Context, version config.Version) error {
-	// version.Channel is required end-to-end: BuildPackageURL already refuses
-	// an empty channel, and InstallSubscription needs an exact channel name
-	// (a silent "stable" fallback would route the Subscription through the
-	// wrong OLM channel and install the wrong CSV stream on a typo).
-	if version.Channel == "" {
-		return fmt.Errorf("version.channel is required")
-	}
-
+	// Channel non-emptiness is guaranteed by config.validateConfig at load
+	// time — see pkg/config/config.go::validateConfig.
 	_, csv, err := o.InstallArtifactVersion(ctx, version)
 	if err != nil {
 		return fmt.Errorf("failed to prepare operator: %v", err)

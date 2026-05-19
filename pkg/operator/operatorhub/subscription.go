@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"knative.dev/pkg/logging"
 )
 
@@ -37,7 +38,7 @@ func (o *Operator) InstallSubscription(ctx context.Context, csv string, channel 
 	log := logging.FromContext(ctx)
 	log.Infow("ensuring subscription for upgrade", "csv", csv, "channel", channel, "namespace", o.namespace)
 
-	existing, err := o.client.Resource(subscriptionGVR).Namespace(o.namespace).Get(ctx, o.name, metav1.GetOptions{})
+	_, err := o.client.Resource(subscriptionGVR).Namespace(o.namespace).Get(ctx, o.name, metav1.GetOptions{})
 	switch {
 	case errors.IsNotFound(err):
 		log.Infow("subscription absent, creating fresh", "name", o.name, "csv", csv, "channel", channel)
@@ -48,7 +49,7 @@ func (o *Operator) InstallSubscription(ctx context.Context, csv string, channel 
 		return fmt.Errorf("failed to get subscription: %v", err)
 	default:
 		log.Infow("subscription exists, rolling forward in place", "name", o.name)
-		if err := o.refreshSubscriptionForUpgrade(ctx, existing, channel); err != nil {
+		if err := o.refreshSubscriptionForUpgrade(ctx, channel); err != nil {
 			return fmt.Errorf("failed to refresh subscription: %v", err)
 		}
 	}
@@ -93,52 +94,72 @@ const refreshAnnotation = "upgrade-test.alauda.io/refresh-trigger"
 // We deliberately do NOT delete and recreate the Subscription, restart the
 // catalog-operator, or touch the CatalogSource — annotation bump is the
 // lightest mechanism that still guarantees a reconcile.
-func (o *Operator) refreshSubscriptionForUpgrade(ctx context.Context, sub *unstructured.Unstructured, channel string) error {
+//
+// Get is performed inside RetryOnConflict so that a 409 (OLM controller
+// updated status concurrently) re-reads the latest resourceVersion before
+// retrying the mutation. Without this, a busy OLM made the first upgrade
+// step flaky on tektoncd-operator and similar high-traffic Subscriptions.
+func (o *Operator) refreshSubscriptionForUpgrade(ctx context.Context, channel string) error {
 	log := logging.FromContext(ctx)
 
-	current, _, _ := unstructured.NestedString(sub.Object, "spec", "channel")
-	if current != channel {
-		log.Infow("patching subscription channel", "from", current, "to", channel)
-		if err := unstructured.SetNestedField(sub.Object, channel, "spec", "channel"); err != nil {
-			return fmt.Errorf("set spec.channel: %w", err)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		sub, err := o.client.Resource(subscriptionGVR).Namespace(o.namespace).Get(ctx, o.name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get subscription: %w", err)
 		}
-	} else {
-		log.Infow("subscription channel already matches target", "channel", channel)
-	}
 
-	annotations, _, _ := unstructured.NestedStringMap(sub.Object, "metadata", "annotations")
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	annotations[refreshAnnotation] = stamp
-	if err := unstructured.SetNestedStringMap(sub.Object, annotations, "metadata", "annotations"); err != nil {
-		return fmt.Errorf("set refresh annotation: %w", err)
-	}
-	log.Infow("force-refresh annotation bumped to trigger OLM reconcile", "annotation", refreshAnnotation, "value", stamp)
+		current, _, _ := unstructured.NestedString(sub.Object, "spec", "channel")
+		if current != channel {
+			log.Infow("patching subscription channel", "from", current, "to", channel)
+			if err := unstructured.SetNestedField(sub.Object, channel, "spec", "channel"); err != nil {
+				return fmt.Errorf("set spec.channel: %w", err)
+			}
+		} else {
+			log.Infow("subscription channel already matches target", "channel", channel)
+		}
 
-	_, err := o.client.Resource(subscriptionGVR).Namespace(o.namespace).Update(ctx, sub, metav1.UpdateOptions{})
-	return err
+		annotations, _, _ := unstructured.NestedStringMap(sub.Object, "metadata", "annotations")
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		stamp := time.Now().UTC().Format(time.RFC3339Nano)
+		annotations[refreshAnnotation] = stamp
+		if err := unstructured.SetNestedStringMap(sub.Object, annotations, "metadata", "annotations"); err != nil {
+			return fmt.Errorf("set refresh annotation: %w", err)
+		}
+		log.Infow("force-refresh annotation bumped to trigger OLM reconcile", "annotation", refreshAnnotation, "value", stamp)
+
+		_, err = o.client.Resource(subscriptionGVR).Namespace(o.namespace).Update(ctx, sub, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 // approveInstallPlan flips spec.approved=true. Idempotent: if the plan is
 // already approved (e.g. retry after a prior partial run), it returns nil
 // without issuing an Update.
+//
+// Get + Update run inside RetryOnConflict so a concurrent OLM status write
+// does not turn the approval into a hard failure — the upgrade flow has no
+// pre-approved state to roll back to and a single 409 here would otherwise
+// abort the entire upgrade path.
 func (o *Operator) approveInstallPlan(ctx context.Context, name, namespace string) error {
 	log := logging.FromContext(ctx)
-	ip, err := o.client.Resource(installPlanGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get install plan: %w", err)
-	}
-	if approved, _, _ := unstructured.NestedBool(ip.Object, "spec", "approved"); approved {
-		log.Infow("install plan already approved, skipping update", "name", name)
-		return nil
-	}
-	if err := unstructured.SetNestedField(ip.Object, true, "spec", "approved"); err != nil {
-		return fmt.Errorf("set spec.approved: %w", err)
-	}
-	_, err = o.client.Resource(installPlanGVR).Namespace(namespace).Update(ctx, ip, metav1.UpdateOptions{})
-	return err
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		ip, err := o.client.Resource(installPlanGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get install plan: %w", err)
+		}
+		if approved, _, _ := unstructured.NestedBool(ip.Object, "spec", "approved"); approved {
+			log.Infow("install plan already approved, skipping update", "name", name)
+			return nil
+		}
+		if err := unstructured.SetNestedField(ip.Object, true, "spec", "approved"); err != nil {
+			return fmt.Errorf("set spec.approved: %w", err)
+		}
+		_, err = o.client.Resource(installPlanGVR).Namespace(namespace).Update(ctx, ip, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv string, channel string) (*unstructured.Unstructured, error) {
