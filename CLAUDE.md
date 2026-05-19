@@ -27,16 +27,19 @@ export KUBECONFIG=<path>
 
 ### 数据流
 
-`config.yaml` → `cmd.UpgradeCommand.Execute` → 对每条 `UpgradePath`，按序遍历 `Versions`：
+`config.yaml` → `cmd.UpgradeCommand.Execute` →
 
-1. `operator.UpgradeOperator(ctx, version)` —— 把集群升级到该版本
-2. `bash -c <testCommand>` 在 `OperatorConfig.Workspace`（可被 `version.TestSubPath` 进一步嵌套）下执行，stdout/stderr 通过 `io.MultiWriter` 同时打印和捕获（见 `pkg/exec/exec.go`）
+1. **Cluster identity guard**（`assertClusterMatch`）—— `operatorConfig.violet.clusters` 非空时要求 `--confirm-cluster=<KUBECONFIG context name>` 精确匹配，防止生产 KUBECONFIG 被误用；in-cluster 运行降级为 warn
+2. **Preflight**（`runPreflight` → `op.PreflightBaseline`，可被 `--skip-preflight` 关闭）—— 对每条 path 的 `Versions[0]` 只读扫描残留 Subscription / ArtifactVersion / 非终态 InstallPlan，30s 超时；任一残留构造 `*cmd.PreflightError` 直接 return（fail-fast 跨 path）
+3. 对每条 `UpgradePath`，按序遍历 `Versions`：
+   - `operator.UpgradeOperator(ctx, version)` —— 把集群升级到该版本
+   - `bash -c <testCommand>` 在 `OperatorConfig.Workspace`（可被 `version.TestSubPath` 进一步嵌套）下执行，stdout/stderr 通过 `io.MultiWriter` 同时打印和捕获（见 `pkg/exec/exec.go`）
 
-第一个版本的默认 `testCommand` 是 `REPO=allure make prepare`（准备测试数据），后续版本默认是 `REPO=allure make upgrade`（验证数据 + 升级断言）。`config.Immediate=true` 时遇到错误立即停止；否则继续下一条 path。
+第一个版本的默认 `testCommand` 是 `REPO=allure make prepare`（准备测试数据），后续版本默认是 `REPO=allure make upgrade`（验证数据 + 升级断言）。`config.Immediate=true` 时遇到错误立即停止；否则继续下一条 path。Preflight 阶段**不**复用 `Immediate` —— preflight 失败永远 fail-fast，因为它是"质量门"而非升级路径的一部分。
 
 ### Operator 抽象
 
-`pkg/operator/interface.go` 定义了仅一个方法的接口 `OperatorInterface.UpgradeOperator`。Factory（`factory.go`）根据 `operatorConfig.type` 选择实现：
+`pkg/operator/interface.go` 定义了 `OperatorInterface`，包含两个方法：`UpgradeOperator(ctx, version)` 和 `PreflightBaseline(ctx, version) ([]preflight.Residual, error)`（后者用于升级前置检查）。`preflight.Residual` 值类型定义在叶子子包 `pkg/operator/preflight` 里，避免与上层 `pkg/operator` 形成 import cycle。Factory（`factory.go`）根据 `operatorConfig.type` 选择实现：
 
 - **`operatorhub`（默认）** —— `pkg/operator/operatorhub/`。生产路径。Artifact / ArtifactVersion 的**写路径**已外包给 `violet` 二进制（子进程，见 `violet.go::installViaViolet`）；Go 侧仍用 dynamic client 做以下三类只读 / OLM 资源：
   - Alauda 自定义资源 `app.alauda.io/v1alpha1` 下的 `Artifact` / `ArtifactVersion`：**Go 端只剩 Get + Delete**（清理残留 AV、等 AV phase=Present、读 status.version 拿 CSV）；Create / Patch / Update 全归 violet。命名空间硬编码 `cpaas-system`，OLM 源名硬编码 `platform`（const `targetCatalogSource` in `operator.go`）。
@@ -67,6 +70,10 @@ Artifact 名称约定：未显式给 `artifact` 字段时，自动拼成 `<artif
 - **`Violet.PushArgs` 不允许写凭证 flag** —— `--username` / `--password` / `--platform-username` / `--platform-password` 都被 `BuildVioletPushArgs` 拒绝（包含 `--flag=value` 形式）。凭证必须走专门的注入入口（platform：`Violet.PlatformUsername`/`PlatformPassword` 或 `VIOLET_PLATFORM_*` env；registry：`VIOLET_REGISTRY_*` env），不准从 `PushArgs` 偷塞，否则会绕过日志屏蔽与 `RedactSecrets`。
 - **`packagePrefix` 是必填字段，无默认值** —— MinIO 根地址跨环境不同，CLI 拒绝硬编码任何默认。空值会在 `BuildPackageURL` 阶段返回 "packagePrefix is empty" 错误。
 - **`Violet.LocalPackageDir` 是可选的本地 .tgz 缓存根** —— 非空时 `acquirePackage` 用 `<LocalPackageDir>/<operatorName>/<packageChannel>/<operatorName>.latest.ALL.<bundleVersion>.tgz` 这个 mirror MinIO URL 的布局检查缓存：命中跳过 HTTP；miss 直接下载到该路径（父目录自动 mkdir），不再走 `/tmp`，下次自动命中；任一路径下都 **不会清理**（cleanup 为 noop），保留为缓存。`VerifySha256` 即使命中也会执行——避免损坏的缓存文件被静默喂给 violet。留空保持旧行为：下载到一次性 `/tmp/upgrade-violet-*` 并在 `defer cleanup()` 中删除，无跨次复用。下载半途失败时 cache 路径的半成品会被 `os.Remove` 清掉，防止下次假命中。
+- **`PreflightBaseline` 是只读、仅检查 baseline** —— 实现在 `pkg/operator/operatorhub/preflight.go`，对每条 path 的 `Versions[0]` 检查 Subscription / ArtifactVersion / 非终态 InstallPlan 三类残留。不调用 Create/Update/Patch/Delete（单测里有 spy reactor 强制断言）。不要扩展为扫所有 versions —— 中间版本是 CLI 自产中间态，归 `installViaViolet::deleteArtifactVersionIfExists` 负责，扫了会双删竞态。CSV 残留**不在 preflight 检查范围内**（独立 CSV 残留必然伴随 Sub 或 AV，已被前三项 check 覆盖；future 若实测出现独立 CSV 残留，按 plan 给的 PackageManifest 路径加，**注意查询 namespace 是 catalog source 的 ns 即 `cpaas-system`，不是 operator 安装 ns**）。
+- **`cmd.SilenceUsage = true` 在 AddFlags 强制开启** —— preflight 失败的 `*PreflightError` 包含可复制粘贴的 `kubectl delete` 命令模板，是 PR 设计的核心 UX；cobra 默认在 RunE 返回 error 时打印 --help 会把这些命令淹没。flag-parsing 错误（如 unknown flag）走的是 cobra 内部不受此影响，仍会打印 usage。
+- **`--confirm-cluster` 匹配规则**（`cmd/upgrade_command.go::assertClusterMatch`）—— 当前实现是**精确字符串相等**（与 KUBECONFIG `CurrentContext` 比较）。要换成子串/正则等更宽松规则，只需改这一个比较，flag surface 不变。in-cluster 运行（无 kubeconfig 文件）降级为 `WARN`，不阻塞 CI pod。
+- **`BundleVersion` 必须符合 `^[a-zA-Z0-9._-]+$`** —— `pkg/config/config.go::validateConfig` 在 LoadConfig 阶段强校验。该字段会被插入 kubectl 命令模板和 violet argv，允许 shell 元字符（`$`/`` ` ``/`;`/quotes）就是 shell 注入。单点 chokepoint 比每个下游 consumer 各自防御更可靠。
 
 ## PR / 协作流程
 

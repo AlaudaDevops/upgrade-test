@@ -278,31 +278,31 @@ cmd.Execute
 
 ### Functional Requirements
 
-- [ ] `OperatorInterface` 新增 `PreflightBaseline(ctx, version) ([]Residual, error)`。
-- [ ] `pkg/operator/residual.go` 新增 `Residual` 类型（kind/namespace/name/recommended_cleanup）。
-- [ ] operatorhub 实现完成 3 类检查（Sub / AV / 非终态 IP w/ OLM labelSelector）。
-- [ ] local 实现返回 `nil, nil`；README 标注 no-op。
-- [ ] `cmd/preflight_error.go` 新增 `*PreflightError`，仅 cmd-internal；Error() 含多行报告 + finalizer 兜底 + skip hint。
-- [ ] `cmd.Execute` 在升级循环前调用 `runPreflight`；fail-fast 跨 path；Get-cache 去重。
-- [ ] `cmd.SilenceUsage = true` 在 preflight 失败路径上确保 cobra 不打印 --help。
-- [ ] 新增 `--skip-preflight` flag：仅 warn 跳过。
-- [ ] 新增 `--confirm-cluster` flag：当 `Violet.Clusters` 非空时必填，CLI 启动早期校验。
-- [ ] `config.validateConfig` 新增 2 条规则：operatorhub 类型时 `Namespace` 必填；`BundleVersion` 正则 `^[a-zA-Z0-9._-]+$`。
-- [ ] kubectl 命令模板用 `%q` 转义 name/namespace；`--context` 用 Go 端 pre-render 不用 `$(...)`。
+- [x] `OperatorInterface` 新增 `PreflightBaseline(ctx, version) ([]Residual, error)`。
+- [x] `pkg/operator/residual.go` 新增 `Residual` 类型（kind/namespace/name/recommended_cleanup）。
+- [x] operatorhub 实现完成 3 类检查（Sub / AV / 非终态 IP w/ OLM labelSelector）。
+- [x] local 实现返回 `nil, nil`；README 标注 no-op。
+- [x] `cmd/preflight_error.go` 新增 `*PreflightError`，仅 cmd-internal；Error() 含多行报告 + finalizer 兜底 + skip hint。
+- [x] `cmd.Execute` 在升级循环前调用 `runPreflight`；fail-fast 跨 path；Get-cache 去重。
+- [x] `cmd.SilenceUsage = true` 在 preflight 失败路径上确保 cobra 不打印 --help。
+- [x] 新增 `--skip-preflight` flag：仅 warn 跳过。
+- [x] 新增 `--confirm-cluster` flag：当 `Violet.Clusters` 非空时必填，CLI 启动早期校验。
+- [x] `config.validateConfig` 新增 2 条规则：operatorhub 类型时 `Namespace` 必填；`BundleVersion` 正则 `^[a-zA-Z0-9._-]+$`。
+- [x] kubectl 命令模板用 `%q` 转义 name/namespace；`--context` 用 Go 端 pre-render 不用 `$(...)`。
 
 ### Non-Functional Requirements
 
-- [ ] preflight 只读：单元测试 mock dynamic client，断言全程**仅** Get/List 调用，无 Create/Update/Patch/Delete。
-- [ ] preflight 性能：每条 path **30s context timeout 硬上限**；典型 N=1 时 < 300ms（含 3 次 Get + 1 次 List）；N=3 时 < 1s。
-- [ ] InstallPlan List 必须带 `operators.coreos.com/<package>.<ns>=` labelSelector，避免扫整 ns 历史 IP。
-- [ ] godoc：`PreflightBaseline` 方法注释明确"只读 + 仅 baseline"；附 `// Preflight contract: this method MUST NOT mutate cluster state.`。
+- [x] preflight 只读：单元测试 mock dynamic client，断言全程**仅** Get/List 调用，无 Create/Update/Patch/Delete。
+- [x] preflight 性能：每条 path **30s context timeout 硬上限**；典型 N=1 时 < 300ms（含 3 次 Get + 1 次 List）；N=3 时 < 1s。
+- [x] InstallPlan List 必须带 `operators.coreos.com/<package>.<ns>=` labelSelector，避免扫整 ns 历史 IP。
+- [x] godoc：`PreflightBaseline` 方法注释明确"只读 + 仅 baseline"；附 `// Preflight contract: this method MUST NOT mutate cluster state.`。
 
 ### Quality Gates
 
-- [ ] 新增单元测试：`pkg/operator/operatorhub/preflight_test.go`，覆盖：clean / 单 Sub 残留 / 单 AV 残留 / 单 IP 残留 / 多类残留 / transient error / NotFound / labelSelector 命中 0。
-- [ ] 新增 `cmd/preflight_error_test.go`：验证 `Error()` 文案稳定（含 finalizer hint + skip hint）。
-- [ ] README 更新："升级前会执行 preflight 检查，残留资源会被列出，需要手动清理。`--skip-preflight` / `--confirm-cluster` 用法说明 + RBAC 最小 verbs"（参考 security #5）。
-- [ ] CLAUDE.md 更新："PreflightBaseline 是只读、仅检查 baseline" 写入"硬约束"段；`cmd.SilenceUsage` 由 preflight 强制开启。
+- [x] 新增单元测试：`pkg/operator/operatorhub/preflight_test.go`，覆盖：clean / 单 Sub 残留 / 单 AV 残留 / 单 IP 残留 / 多类残留 / transient error / NotFound / labelSelector 命中 0。
+- [x] 新增 `cmd/preflight_error_test.go`：验证 `Error()` 文案稳定（含 finalizer hint + skip hint）。
+- [x] README 更新："升级前会执行 preflight 检查，残留资源会被列出，需要手动清理。`--skip-preflight` / `--confirm-cluster` 用法说明 + RBAC 最小 verbs"（参考 security #5）。
+- [x] CLAUDE.md 更新："PreflightBaseline 是只读、仅检查 baseline" 写入"硬约束"段；`cmd.SilenceUsage` 由 preflight 强制开启。
 
 ## Success Metrics
 
