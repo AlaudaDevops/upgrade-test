@@ -96,6 +96,36 @@ type VioletConfig struct {
 	// "updated successfully" while the CRs never appear in the cluster the
 	// upgrade CLI is watching.
 	Clusters string `yaml:"clusters,omitempty"`
+
+	// PlatformUsername / PlatformPassword authenticate violet against the
+	// ACP platform for Artifact/AV writes. They take precedence over the
+	// environment variables VIOLET_PLATFORM_USERNAME / _PASSWORD, which
+	// remain supported as a fallback for CI/pipeline injection. When both
+	// are set, the config value wins.
+	//
+	// WARNING: writing credentials here will commit them to git if the
+	// config file is checked in. Prefer environment variables in shared
+	// repos; reserve this field for local one-off runs or for configs
+	// stored outside source control.
+	PlatformUsername string `yaml:"platformUsername,omitempty"`
+	PlatformPassword string `yaml:"platformPassword,omitempty"`
+
+	// LocalPackageDir, when non-empty, is the on-disk cache root for
+	// downloaded .tgz packages. Layout mirrors the MinIO URL convention:
+	//
+	//	<LocalPackageDir>/<operatorName>/<packageChannel>/<operatorName>.latest.ALL.<bundleVersion>.tgz
+	//
+	// On cache hit the HTTP download is skipped. On miss the file is
+	// downloaded directly into the cache path (parent dirs auto-created)
+	// so subsequent runs hit the cache. SHA-256 verification (when
+	// ExpectedSha256 is set) still runs against the cached file — a
+	// corrupted cache entry will surface as a verification failure rather
+	// than silently propagate. Relative paths resolve to the upgrade CLI
+	// working directory.
+	//
+	// Leave empty to keep the legacy behavior: download to a per-call
+	// /tmp dir and remove on exit (no cross-run reuse).
+	LocalPackageDir string `yaml:"localPackageDir,omitempty"`
 }
 
 // UpgradePath represents a single upgrade path

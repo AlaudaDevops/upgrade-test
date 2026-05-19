@@ -117,14 +117,22 @@ type VioletPushParams struct {
 	SkipPush        bool
 	PlatformAddress string
 	Clusters        string
-	PushArgs        []string
+	// PlatformUsername / PlatformPassword come from VioletConfig and, when
+	// non-empty, override the env-var fallback. See BuildVioletPushArgs for
+	// the precedence rule.
+	PlatformUsername string
+	PlatformPassword string
+	PushArgs         []string
 }
 
-// BuildVioletPushArgs assembles the argv for `violet push <tgz>`. Credentials
-// are read from environment variables and injected when non-empty:
+// BuildVioletPushArgs assembles the argv for `violet push <tgz>`.
 //
-//	VIOLET_REGISTRY_USERNAME / _PASSWORD → --username / --password
-//	VIOLET_PLATFORM_USERNAME / _PASSWORD → --platform-username / --platform-password
+// Credentials precedence:
+//   - Platform: VioletPushParams.PlatformUsername / PlatformPassword win when
+//     non-empty; otherwise fall back to VIOLET_PLATFORM_USERNAME / _PASSWORD.
+//     Mapped to --platform-username / --platform-password.
+//   - Registry: env-only — VIOLET_REGISTRY_USERNAME / _PASSWORD → --username / --password.
+//     Used in private-registry push flow (skipPush:false).
 //
 // PushArgs is appended verbatim so unsupported flags can still be threaded
 // through without a code change.
@@ -153,11 +161,19 @@ func BuildVioletPushArgs(p VioletPushParams) ([]string, error) {
 	if p2 := os.Getenv(EnvVioletRegistryPassword); p2 != "" {
 		args = append(args, flagPassword, p2)
 	}
-	if u := os.Getenv(EnvVioletPlatformUsername); u != "" {
-		args = append(args, flagPlatformUsername, u)
+	platformUser := p.PlatformUsername
+	if platformUser == "" {
+		platformUser = os.Getenv(EnvVioletPlatformUsername)
 	}
-	if p2 := os.Getenv(EnvVioletPlatformPassword); p2 != "" {
-		args = append(args, flagPlatformPassword, p2)
+	if platformUser != "" {
+		args = append(args, flagPlatformUsername, platformUser)
+	}
+	platformPass := p.PlatformPassword
+	if platformPass == "" {
+		platformPass = os.Getenv(EnvVioletPlatformPassword)
+	}
+	if platformPass != "" {
+		args = append(args, flagPlatformPassword, platformPass)
 	}
 	args = append(args, p.PushArgs...)
 	return args, nil
@@ -230,11 +246,10 @@ func (o *Operator) installViaViolet(ctx context.Context, version config.Version)
 	if err != nil {
 		return nil, "", fmt.Errorf("build package url: %w", err)
 	}
-	log.Infow("downloading violet package", "url", url)
 
-	tgzPath, cleanup, err := downloadToTemp(ctx, url, o.timeout)
+	tgzPath, cleanup, err := o.acquirePackage(ctx, url, version)
 	if err != nil {
-		return nil, "", fmt.Errorf("download %s: %w", url, err)
+		return nil, "", fmt.Errorf("acquire package %s: %w", url, err)
 	}
 	defer cleanup()
 
@@ -279,6 +294,49 @@ func (o *Operator) installViaViolet(ctx context.Context, version config.Version)
 	return av, csv, nil
 }
 
+// acquirePackage returns a local .tgz path for `version` and a cleanup
+// callback to release any transient resources. When VioletConfig.LocalPackageDir
+// is non-empty the on-disk cache layout mirrors the MinIO URL convention; on
+// hit the HTTP fetch is skipped, on miss the file is downloaded directly into
+// the cache path (so subsequent runs hit). The returned cleanup is a no-op in
+// the cache path because surviving the run is the whole point.
+//
+// When LocalPackageDir is empty the legacy flow runs: download to a per-call
+// /tmp directory and remove on cleanup, no cross-run reuse.
+func (o *Operator) acquirePackage(ctx context.Context, rawURL string, version config.Version) (string, func(), error) {
+	log := logging.FromContext(ctx)
+	noop := func() {}
+
+	if o.violet.LocalPackageDir != "" {
+		cachePath := filepath.Join(
+			o.violet.LocalPackageDir,
+			o.name,
+			version.EffectivePackageChannel(),
+			fmt.Sprintf("%s.latest.ALL.%s.tgz", o.name, version.BundleVersion),
+		)
+		if info, err := os.Stat(cachePath); err == nil && !info.IsDir() {
+			log.Infow("reusing cached violet package", "path", cachePath, "size", info.Size())
+			return cachePath, noop, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("stat cache %s: %w", cachePath, err)
+		}
+		log.Infow("downloading violet package to cache", "url", rawURL, "path", cachePath)
+		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+			return "", nil, fmt.Errorf("mkdir cache dir: %w", err)
+		}
+		if err := downloadFile(ctx, rawURL, cachePath, o.timeout); err != nil {
+			// Drop a half-written file so the next run does a clean retry
+			// instead of falsely "hitting" the cache with a truncated blob.
+			_ = os.Remove(cachePath)
+			return "", nil, err
+		}
+		return cachePath, noop, nil
+	}
+
+	log.Infow("downloading violet package", "url", rawURL)
+	return downloadToTemp(ctx, rawURL, o.timeout)
+}
+
 // downloadToTemp fetches rawURL into a fresh temporary directory and returns
 // the local file path plus a cleanup function. The caller MUST invoke cleanup
 // (typically via defer) once the file is no longer needed. The temp dir is
@@ -288,9 +346,6 @@ func (o *Operator) installViaViolet(ctx context.Context, version config.Version)
 // applied via a derived context so a slow or half-open MinIO peer cannot pin
 // the goroutine for hours waiting on OS-level TCP keepalive.
 func downloadToTemp(ctx context.Context, rawURL string, timeout time.Duration) (string, func(), error) {
-	dlCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	dir, err := os.MkdirTemp("", "upgrade-violet-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("mkdir temp: %w", err)
@@ -309,45 +364,53 @@ func downloadToTemp(ctx context.Context, rawURL string, timeout time.Duration) (
 	}
 	filePath := filepath.Join(dir, fileName)
 
+	if err := downloadFile(ctx, rawURL, filePath, timeout); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return filePath, cleanup, nil
+}
+
+// downloadFile streams rawURL into destPath. The destination's parent
+// directory must already exist (caller is responsible). On any error the
+// caller should clean up destPath — downloadFile does not, because it does
+// not know whether destPath is a throwaway tmp file or a persistent cache
+// entry that the caller wants to retry into.
+//
+// timeout bounds the entire HTTP exchange (dial + headers + body) via a
+// derived context, so a slow or half-open peer cannot pin the goroutine.
+func downloadFile(ctx context.Context, rawURL, destPath string, timeout time.Duration) error {
+	dlCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("build request: %w", err)
+		return fmt.Errorf("build request: %w", err)
 	}
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("http get: %w", err)
+		return fmt.Errorf("http get: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		cleanup()
-		return "", nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, rawURL)
+		return fmt.Errorf("unexpected status %d from %s", resp.StatusCode, rawURL)
 	}
-
-	f, err := os.Create(filePath)
+	f, err := os.Create(destPath)
 	if err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("create %s: %w", filePath, err)
+		return fmt.Errorf("create %s: %w", destPath, err)
 	}
-
 	// Explicit close-and-check: on many filesystems write buffers are only
 	// flushed during Close(), so swallowing its error via defer can let a
 	// truncated .tgz reach VerifySha256 (which is optional today) and then
 	// violet push, producing a misleading "violet push:" error.
 	if _, err := io.Copy(f, resp.Body); err != nil {
 		_ = f.Close()
-		cleanup()
-		return "", nil, fmt.Errorf("copy body to %s: %w", filePath, err)
+		return fmt.Errorf("copy body to %s: %w", destPath, err)
 	}
 	if err := f.Close(); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("close %s after download: %w", filePath, err)
+		return fmt.Errorf("close %s after download: %w", destPath, err)
 	}
-
-	return filePath, cleanup, nil
+	return nil
 }
 
 // deleteArtifactVersionIfExists removes a stale ArtifactVersion with the same
@@ -418,11 +481,13 @@ func (o *Operator) execVioletPush(ctx context.Context, tgzPath string) error {
 		skipPush = *o.violet.SkipPush
 	}
 	args, err := BuildVioletPushArgs(VioletPushParams{
-		TgzPath:         tgzPath,
-		SkipPush:        skipPush,
-		PlatformAddress: o.violet.PlatformAddress,
-		Clusters:        o.violet.Clusters,
-		PushArgs:        o.violet.PushArgs,
+		TgzPath:          tgzPath,
+		SkipPush:         skipPush,
+		PlatformAddress:  o.violet.PlatformAddress,
+		Clusters:         o.violet.Clusters,
+		PlatformUsername: o.violet.PlatformUsername,
+		PlatformPassword: o.violet.PlatformPassword,
+		PushArgs:         o.violet.PushArgs,
 	})
 	if err != nil {
 		return err
@@ -432,14 +497,21 @@ func (o *Operator) execVioletPush(ctx context.Context, tgzPath string) error {
 
 	// Also redact the credential values themselves from violet's own
 	// stdout/stderr — MaskCommand only protects the line WE log, not what
-	// violet itself might echo (e.g. verbose argv dumps).
+	// violet itself might echo (e.g. verbose argv dumps). Resolve platform
+	// password with the same precedence as BuildVioletPushArgs (config wins,
+	// env falls back) so the redactor sees whichever value will actually be
+	// passed to violet.
+	platformPass := o.violet.PlatformPassword
+	if platformPass == "" {
+		platformPass = os.Getenv(EnvVioletPlatformPassword)
+	}
 	result := exec.RunCommand(ctx, exec.Command{
 		Name:         bin,
 		Args:         args,
 		EnvAllowlist: violetEnvAllowlist,
 		RedactSecrets: []string{
 			os.Getenv(EnvVioletRegistryPassword),
-			os.Getenv(EnvVioletPlatformPassword),
+			platformPass,
 		},
 	})
 	return result.Err
