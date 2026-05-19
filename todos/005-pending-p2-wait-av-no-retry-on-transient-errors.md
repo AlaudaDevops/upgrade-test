@@ -10,7 +10,7 @@ dependencies: []
 
 # Problem Statement
 
-`pkg/operator/operatorhub/artifact_versiong.go:75-78`：
+`pkg/operator/operatorhub/artifact_version.go:75-78`：
 
 ```go
 obj, err := o.client.Resource(artifactVersionGVR).Namespace(systemNamespace).Get(ctx, name, metav1.GetOptions{})
@@ -26,7 +26,7 @@ if err != nil {
 # Findings
 
 - **silent-failure-hunter** F3（HIGH）独立命中
-- 文件：`pkg/operator/operatorhub/artifact_versiong.go:72-93`
+- 文件：`pkg/operator/operatorhub/artifact_version.go:72-93`
 - 影响：CI 升级假阴性、可靠性下降、对工具的信心受损
 
 # Proposed Solutions
@@ -64,7 +64,7 @@ case err != nil:
 
 # Technical Details
 
-- 影响文件：`pkg/operator/operatorhub/artifact_versiong.go:72-93`
+- 影响文件：`pkg/operator/operatorhub/artifact_version.go:72-93`
 - 同样的模式可顺便审视：`waitPackageManifest` 已经对 NotFound 单独处理（line 98），但其他 transient 没有，建议一并对齐
 
 # Acceptance Criteria

@@ -73,7 +73,7 @@ if !found || csv == "" {
 
 # Technical Details
 
-- 影响文件：`pkg/operator/operatorhub/operator.go:109-127`、`pkg/operator/operatorhub/artifact_versiong.go:18`
+- 影响文件：`pkg/operator/operatorhub/operator.go:109-127`、`pkg/operator/operatorhub/artifact_version.go:18`
 - 测试：现有 unit 覆盖偏少；可加 fake-client 注入 status.version=null 的 AV，断言 UpgradeOperator 在 AV 阶段就报错
 
 # Acceptance Criteria

@@ -3,7 +3,7 @@
 - **日期**：2026-05-18
 - **范围**：仅讨论"上架"这一步（Artifact / ArtifactVersion 创建）；OLM Subscription / InstallPlan / CSV 不在本次重构内
 - **现状代码锚点**：
-  - `pkg/operator/operatorhub/artifact_versiong.go:15-89`（`InstallArtifactVersion` + `createArtifactVersion` 硬编码 unstructured）
+  - `pkg/operator/operatorhub/artifact_version.go:15-89`（`InstallArtifactVersion` + `createArtifactVersion` 硬编码 unstructured）
   - `pkg/exec/exec.go:43-80`（已有的子进程执行机制，testCommand 走这条）
   - `pkg/config/config.go:29-52`（`OperatorConfig`）
 
@@ -51,7 +51,7 @@
 
 ### 1. violet 接管范围：**只接管"创建 Artifact/ArtifactVersion"**
 
-- 替换：`createArtifactVersion`（`artifact_versiong.go:51-90`）
+- 替换：`createArtifactVersion`（`artifact_version.go:51-90`）
 - 保留：`waitArtifactVersionPresent`、`waitPackageManifest`、`InstallSubscription`、InstallPlan 手动审批
 - 原因：violet 物理上不管 OLM 资源；保留 Go 控制 OLM 流程 = 升级时序仍然由 upgrade CLI 把控
 
@@ -118,7 +118,7 @@ operatorConfig:
 ## 实施轮廓（不细化，留给 plan）
 
 - 新建 `pkg/operator/operatorhub/violet.go`（拼 URL + 下载 + exec violet push）
-- 替换 `artifact_versiong.go` 里 `createArtifactVersion` 的调用点
+- 替换 `artifact_version.go` 里 `createArtifactVersion` 的调用点
 - `pkg/config/config.go` 增字段 + 默认值
 - 文档：更新 README 和 CLAUDE.md "新加 Operator 类型时" 段落（提及 violet 路径）
 

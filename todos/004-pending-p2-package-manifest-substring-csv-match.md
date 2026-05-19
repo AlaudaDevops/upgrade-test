@@ -10,7 +10,7 @@ dependencies: []
 
 # Problem Statement
 
-`waitPackageManifest` 在 `pkg/operator/operatorhub/artifact_versiong.go:120-122` 用 substring 匹配 CSV 名：
+`waitPackageManifest` 在 `pkg/operator/operatorhub/artifact_version.go:120-122` 用 substring 匹配 CSV 名：
 
 ```go
 csvName, _, _ := unstructured.NestedString(entryMap, "name")
@@ -24,7 +24,7 @@ if strings.Contains(csvName, csv) {
 # Findings
 
 - **silent-failure-hunter** F2（HIGH）独立命中
-- 文件：`pkg/operator/operatorhub/artifact_versiong.go:106-122`
+- 文件：`pkg/operator/operatorhub/artifact_version.go:106-122`
 - 三处 `_, _, _` 同时丢弃了 NestedSlice / NestedString 的错误返回，schema drift 也被静默吞掉
 
 # Proposed Solutions
@@ -59,7 +59,7 @@ if found && csvName == csv {
 
 # Technical Details
 
-- 影响文件：`pkg/operator/operatorhub/artifact_versiong.go`
+- 影响文件：`pkg/operator/operatorhub/artifact_version.go`
 - 测试：添加单元测试覆盖 (a) 精确匹配命中 (b) `v0.65.0` 不命中 `v0.65.0-rc1` (c) NestedString 类型错误返回
 
 # Acceptance Criteria
