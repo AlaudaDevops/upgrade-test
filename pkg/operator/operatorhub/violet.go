@@ -87,24 +87,32 @@ func validatePushArgs(args []string) error {
 
 // BuildPackageURL composes the .tgz URL by the agreed MinIO convention:
 //
-//	<prefix>/<name>/<channel>/<name>.latest.ALL.<bundleVersion>.tgz
+//	<prefix>/<name>/<pathChannel>/<name>.<fileChannel>.ALL.<bundleVersion>.tgz
 //
-// A trailing slash on prefix is tolerated. All four inputs are required; any
+// pathChannel is the directory segment (Version.EffectivePackageChannel — may
+// be a release-train name like "v4.0" / "rc"). fileChannel is the in-filename
+// segment, which uploaders set to the OLM channel (Version.Channel, typically
+// "stable"). The two diverge when packageChannel is used to fan out path
+// hierarchies, but every uploader keeps the filename tied to the OLM channel.
+//
+// A trailing slash on prefix is tolerated. All five inputs are required; any
 // empty value returns an error so callers fail loudly instead of producing a
 // malformed URL that 404s later.
-func BuildPackageURL(prefix, name, channel, bundleVersion string) (string, error) {
+func BuildPackageURL(prefix, name, pathChannel, fileChannel, bundleVersion string) (string, error) {
 	switch {
 	case prefix == "":
 		return "", fmt.Errorf("packagePrefix is empty")
 	case name == "":
 		return "", fmt.Errorf("operator name is empty")
-	case channel == "":
-		return "", fmt.Errorf("channel is empty (Version.Channel is required when using violet)")
+	case pathChannel == "":
+		return "", fmt.Errorf("path channel is empty (Version.EffectivePackageChannel is required when using violet)")
+	case fileChannel == "":
+		return "", fmt.Errorf("file channel is empty (Version.Channel is required when using violet)")
 	case bundleVersion == "":
 		return "", fmt.Errorf("bundleVersion is empty")
 	}
 	p := strings.TrimRight(prefix, "/")
-	return fmt.Sprintf("%s/%s/%s/%s.latest.ALL.%s.tgz", p, name, channel, name, bundleVersion), nil
+	return fmt.Sprintf("%s/%s/%s/%s.%s.ALL.%s.tgz", p, name, pathChannel, name, fileChannel, bundleVersion), nil
 }
 
 // VioletPushParams is the resolved, pointer-free shape of `violet push`
@@ -242,7 +250,7 @@ func (o *Operator) installViaViolet(ctx context.Context, version config.Version)
 		return nil, "", fmt.Errorf("get artifact %s: %w", o.artifact, err)
 	}
 
-	url, err := BuildPackageURL(o.violet.PackagePrefix, o.name, version.EffectivePackageChannel(), version.BundleVersion)
+	url, err := BuildPackageURL(o.violet.PackagePrefix, o.name, version.EffectivePackageChannel(), version.Channel, version.BundleVersion)
 	if err != nil {
 		return nil, "", fmt.Errorf("build package url: %w", err)
 	}
@@ -312,7 +320,7 @@ func (o *Operator) acquirePackage(ctx context.Context, rawURL string, version co
 			o.violet.LocalPackageDir,
 			o.name,
 			version.EffectivePackageChannel(),
-			fmt.Sprintf("%s.latest.ALL.%s.tgz", o.name, version.BundleVersion),
+			fmt.Sprintf("%s.%s.ALL.%s.tgz", o.name, version.Channel, version.BundleVersion),
 		)
 		if info, err := os.Stat(cachePath); err == nil && !info.IsDir() {
 			log.Infow("reusing cached violet package", "path", cachePath, "size", info.Size())

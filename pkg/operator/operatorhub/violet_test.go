@@ -47,44 +47,58 @@ func TestBuildPackageURL(t *testing.T) {
 		name          string
 		prefix        string
 		opName        string
-		channel       string
+		pathChannel   string
+		fileChannel   string
 		bundleVersion string
 		want          string
 		wantErr       bool
 	}{
 		{
-			name:          "v4.6 channel with v-prefixed version",
+			name:          "tektoncd v4.6 stable: path uses train, file uses OLM channel",
 			prefix:        "http://package-minio.alauda.cn:9199/packages/",
 			opName:        "tektoncd-operator",
-			channel:       "v4.6",
+			pathChannel:   "v4.6",
+			fileChannel:   "stable",
 			bundleVersion: "v4.6.0",
-			want:          "http://package-minio.alauda.cn:9199/packages/tektoncd-operator/v4.6/tektoncd-operator.latest.ALL.v4.6.0.tgz",
+			want:          "http://package-minio.alauda.cn:9199/packages/tektoncd-operator/v4.6/tektoncd-operator.stable.ALL.v4.6.0.tgz",
 		},
 		{
-			name:          "rc channel with rc-build suffix",
+			name:          "rc train still uses stable filename segment",
 			prefix:        "http://package-minio.alauda.cn:9199/packages/",
 			opName:        "tektoncd-operator",
-			channel:       "rc",
+			pathChannel:   "rc",
+			fileChannel:   "stable",
 			bundleVersion: "v4.2.5-rc.76.g976cff6",
-			want:          "http://package-minio.alauda.cn:9199/packages/tektoncd-operator/rc/tektoncd-operator.latest.ALL.v4.2.5-rc.76.g976cff6.tgz",
+			want:          "http://package-minio.alauda.cn:9199/packages/tektoncd-operator/rc/tektoncd-operator.stable.ALL.v4.2.5-rc.76.g976cff6.tgz",
 		},
 		{
-			name:          "prefix without trailing slash",
+			name:          "gitlab v17.11 stable: cross-operator parity",
+			prefix:        "http://package-minio.alauda.cn:9199/packages/",
+			opName:        "gitlab-ce-operator",
+			pathChannel:   "v17.11",
+			fileChannel:   "stable",
+			bundleVersion: "v17.11.4",
+			want:          "http://package-minio.alauda.cn:9199/packages/gitlab-ce-operator/v17.11/gitlab-ce-operator.stable.ALL.v17.11.4.tgz",
+		},
+		{
+			name:          "prefix without trailing slash, two channels coincide",
 			prefix:        "http://example.com/pkgs",
 			opName:        "op",
-			channel:       "stable",
+			pathChannel:   "stable",
+			fileChannel:   "stable",
 			bundleVersion: "v1.0.0",
-			want:          "http://example.com/pkgs/op/stable/op.latest.ALL.v1.0.0.tgz",
+			want:          "http://example.com/pkgs/op/stable/op.stable.ALL.v1.0.0.tgz",
 		},
-		{name: "empty prefix", prefix: "", opName: "op", channel: "stable", bundleVersion: "v1.0.0", wantErr: true},
-		{name: "empty name", prefix: "http://x/", channel: "stable", bundleVersion: "v1.0.0", wantErr: true},
-		{name: "empty channel", prefix: "http://x/", opName: "op", bundleVersion: "v1.0.0", wantErr: true},
-		{name: "empty bundleVersion", prefix: "http://x/", opName: "op", channel: "stable", wantErr: true},
+		{name: "empty prefix", prefix: "", opName: "op", pathChannel: "stable", fileChannel: "stable", bundleVersion: "v1.0.0", wantErr: true},
+		{name: "empty name", prefix: "http://x/", pathChannel: "stable", fileChannel: "stable", bundleVersion: "v1.0.0", wantErr: true},
+		{name: "empty path channel", prefix: "http://x/", opName: "op", fileChannel: "stable", bundleVersion: "v1.0.0", wantErr: true},
+		{name: "empty file channel", prefix: "http://x/", opName: "op", pathChannel: "stable", bundleVersion: "v1.0.0", wantErr: true},
+		{name: "empty bundleVersion", prefix: "http://x/", opName: "op", pathChannel: "stable", fileChannel: "stable", wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := BuildPackageURL(tc.prefix, tc.opName, tc.channel, tc.bundleVersion)
+			got, err := BuildPackageURL(tc.prefix, tc.opName, tc.pathChannel, tc.fileChannel, tc.bundleVersion)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("want error, got url=%q", got)
