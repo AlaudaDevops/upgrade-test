@@ -38,10 +38,10 @@ export KUBECONFIG=<path>
 
 `pkg/operator/interface.go` 定义了仅一个方法的接口 `OperatorInterface.UpgradeOperator`。Factory（`factory.go`）根据 `operatorConfig.type` 选择实现：
 
-- **`operatorhub`（默认）** —— `pkg/operator/operatorhub/`。生产路径。通过 dynamic client + `unstructured` 操作三类资源：
-  - Alauda 自定义资源 `app.alauda.io/v1alpha1` 下的 `Artifact` / `ArtifactVersion`（系统命名空间硬编码为 `cpaas-system`，OLM 源名硬编码为 `platform`）
+- **`operatorhub`（默认）** —— `pkg/operator/operatorhub/`。生产路径。Artifact / ArtifactVersion 的**写路径**已外包给 `violet` 二进制（子进程，见 `violet.go::installViaViolet`）；Go 侧仍用 dynamic client 做以下三类只读 / OLM 资源：
+  - Alauda 自定义资源 `app.alauda.io/v1alpha1` 下的 `Artifact` / `ArtifactVersion`：**Go 端只剩 Get + Delete**（清理残留 AV、等 AV phase=Present、读 status.version 拿 CSV）；Create / Patch / Update 全归 violet。命名空间硬编码 `cpaas-system`，OLM 源名硬编码 `platform`（const `targetCatalogSource` in `operator.go`）。
   - OLM 标准资源 `Subscription` / `InstallPlan` / `ClusterServiceVersion` / `PackageManifest`
-  - 升级流程：`InstallArtifactVersion`（创建 ArtifactVersion → 等 phase=Present → 等 PackageManifest 出现对应 CSV）→ `InstallSubscription`（先删旧 Sub + 旧 CSV → 创建 Subscription `installPlanApproval: Manual` → 等 InstallPlan → 把 `spec.approved=true` → 等 CSV phase=Succeeded）
+  - 升级流程：`InstallArtifactVersion`（下载 .tgz → 可选 sha256 校验 → 删除同名 AV 残留 → 调 `violet push` → 等 AV phase=Present 并 cross-check spec.tag → 等 PackageManifest 出现对应 CSV）→ `InstallSubscription`：**Subscription 不存在则创建**（`installPlanApproval: Manual`, `startingCSV=目标 CSV`）；**Subscription 已存在则 in-place refresh**（必要时 patch `spec.channel`，并总是 bump `upgrade-test.alauda.io/refresh-trigger` 注解强制 OLM 重新 reconcile，**不删除、不重建**——依赖 OLM replace chain 滚动到新 CSV）→ 等 InstallPlan（用 `waitInstallPlanForCSV` 匹配 `spec.clusterServiceVersionNames` 包含目标 CSV，避免拿到 `status.installplan.name` 短暂指向的旧 IP）→ patch `spec.approved=true` → 等 CSV phase=Succeeded
 - **`local`** —— `pkg/operator/local/operator.go`。本地开发用，直接在 workspace 里跑 `make deploy`（可被 `operatorConfig.command` 覆盖），不接 OLM。
 
 新增 Operator 类型时：在 `pkg/operator/` 下加子包实现 `OperatorInterface`，并在 `factory.go` 的 `CreateOperator` switch 中注册。
@@ -54,12 +54,19 @@ Artifact 名称约定：未显式给 `artifact` 字段时，自动拼成 `<artif
 
 ## 写代码时要注意的硬约束
 
-- **不要把命名空间或 OLM source 写成参数** —— 当前实现里 `cpaas-system` 和 `source: platform` 是硬编码常量，跨 Operator 共用。如果业务上需要支持其他来源，先和用户确认。
+- **Artifact / ArtifactVersion 写路径由 violet 子进程负责** —— Go 端只剩 Get + Delete。如果未来要重新加 Create / Patch / Update 必须先和用户确认是否要回退 violet 委托。`violet.go::installViaViolet` 是唯一调用点。
+- **不要把命名空间或 OLM source 写成参数** —— 当前实现里 `cpaas-system` 和 `source: platform`（`const targetCatalogSource` in `operator.go`）是硬编码常量，跨 Operator 共用，并与 violet 命令 `--target-catalog-source` 共享同一来源。如果业务上需要支持其他来源，先和用户确认。
 - **InstallPlan 一定是手动审批模式** —— `installPlanApproval: "Manual"`，由 `InstallSubscription` 自己 patch `spec.approved=true`。不要改成 Automatic，否则升级时序会乱。
 - **新加 GVR 时统一在 `operator.go` 顶部声明** —— 见 `artifactGVR` / `subscriptionGVR` 等，不要在调用点 inline。
 - **轮询用 `wait.PollUntilContextTimeout`** —— 间隔/超时都从 `OperatorConfig.Interval` / `Timeout` 拿，不要写常量。
 - **日志走 knative `logging.FromContext(ctx)`** —— `cmd/upgrade_command.go` 在 ctx 上注入了 zap sugar logger，子包不要再自己起 logger。
-- **YAML 字段大小写**：`config.go` 用的是 `yaml:"xxx,omitempty"` 小写驼峰（`operatorConfig`、`upgradePaths`、`bundleVersion`），demo 配置与 README 也是这套；改字段时同步改三处。
+- **YAML 字段大小写**：`config.go` 用的是 `yaml:"xxx,omitempty"` 小写驼峰（`operatorConfig`、`upgradePaths`、`bundleVersion`、`violet`），demo 配置与 README 也是这套；改字段时同步改三处。
+- **凭证注入：platform 双通道，registry 单通道** —— platform 凭证可走 `Violet.PlatformUsername` / `Violet.PlatformPassword`（config，yaml 字段 `platformUsername` / `platformPassword`）**或** `VIOLET_PLATFORM_USERNAME` / `VIOLET_PLATFORM_PASSWORD`（env），由 `BuildVioletPushArgs` 自动追加进 violet argv；两路都设置时 **config 优先，env 兜底**。registry 凭证仍只走环境变量 `VIOLET_REGISTRY_USERNAME` / `VIOLET_REGISTRY_PASSWORD`。写入 config 的凭证会随 yaml 进 git，敏感场景请用 env 注入。日志层 mask `--password` 和 `--platform-password` 后的值（`isPasswordFlag`），同时 `execVioletPush` 把解析后（config 或 env）的 platform 密码加入 `RedactSecrets` 以擦掉 violet 自身 stdout/stderr 的回显。`pkg/exec.Command.EnvAllowlist` 限制子进程 env 范围，调 violet 时只透传 `KUBECONFIG` / `PATH` / `HOME` / `USER` / `VIOLET_*`。
+- **CLI 永远给 violet 传 `--force`** —— 不传时 violet 误判 "already exist, skip it" 直接 no-op，导致 wait AV Present 超时。upgrade CLI 已经在 `installViaViolet` 里 ensure-clean 删除残留 AV，所以"保留 stale AV"不是合法诉求，没必要开放 Force 配置字段。
+- **`Violet.Clusters` 多集群必填** —— violet 默认写 `global` 子集群，跟 kubectl 实际连的子集群（如 `/kubernetes/devops`）可能不一致；不填会出现 "violet 报 success 但 AV 在 kubectl 看不到" 的静默假成功。
+- **`Violet.PushArgs` 不允许写凭证 flag** —— `--username` / `--password` / `--platform-username` / `--platform-password` 都被 `BuildVioletPushArgs` 拒绝（包含 `--flag=value` 形式）。凭证必须走专门的注入入口（platform：`Violet.PlatformUsername`/`PlatformPassword` 或 `VIOLET_PLATFORM_*` env；registry：`VIOLET_REGISTRY_*` env），不准从 `PushArgs` 偷塞，否则会绕过日志屏蔽与 `RedactSecrets`。
+- **`packagePrefix` 是必填字段，无默认值** —— MinIO 根地址跨环境不同，CLI 拒绝硬编码任何默认。空值会在 `BuildPackageURL` 阶段返回 "packagePrefix is empty" 错误。
+- **`Violet.LocalPackageDir` 是可选的本地 .tgz 缓存根** —— 非空时 `acquirePackage` 用 `<LocalPackageDir>/<operatorName>/<packageChannel>/<operatorName>.latest.ALL.<bundleVersion>.tgz` 这个 mirror MinIO URL 的布局检查缓存：命中跳过 HTTP；miss 直接下载到该路径（父目录自动 mkdir），不再走 `/tmp`，下次自动命中；任一路径下都 **不会清理**（cleanup 为 noop），保留为缓存。`VerifySha256` 即使命中也会执行——避免损坏的缓存文件被静默喂给 violet。留空保持旧行为：下载到一次性 `/tmp/upgrade-violet-*` 并在 `defer cleanup()` 中删除，无跨次复用。下载半途失败时 cache 路径的半成品会被 `os.Remove` 清掉，防止下次假命中。
 
 ## PR / 协作流程
 

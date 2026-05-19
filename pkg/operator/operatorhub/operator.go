@@ -22,6 +22,11 @@ type Operator struct {
 
 	timeout  time.Duration
 	interval time.Duration
+
+	// violet captures how to invoke the external `violet` binary for
+	// Artifact/ArtifactVersion creation. nil disables the violet path;
+	// in that case InstallArtifactVersion returns a config error.
+	violet *config.VioletConfig
 }
 
 const (
@@ -93,6 +98,7 @@ func NewOperator(config *rest.Config, options config.OperatorConfig) (*Operator,
 		artifact:  artifact,
 		timeout:   options.Timeout,
 		interval:  options.Interval,
+		violet:    options.Violet,
 	}, nil
 }
 
@@ -101,19 +107,14 @@ func (o *Operator) GetResource(ctx context.Context, name, namespace string, gvr 
 }
 
 func (o *Operator) UpgradeOperator(ctx context.Context, version config.Version) error {
-	// Install artifact version
-	av, err := o.InstallArtifactVersion(ctx, version.BundleVersion)
+	// Channel non-emptiness is guaranteed by config.validateConfig at load
+	// time — see pkg/config/config.go::validateConfig.
+	_, csv, err := o.InstallArtifactVersion(ctx, version)
 	if err != nil {
 		return fmt.Errorf("failed to prepare operator: %v", err)
 	}
 
-	// Get CSV version from artifact version
-	csv, _, _ := unstructured.NestedString(av.Object, "status", "version")
-	channel := version.Channel
-	if channel == "" {
-		channel = "stable" // default fallback
-	}
-	if err := o.InstallSubscription(ctx, csv, channel); err != nil {
+	if err := o.InstallSubscription(ctx, csv, version.Channel); err != nil {
 		return fmt.Errorf("failed to install subscription: %v", err)
 	}
 

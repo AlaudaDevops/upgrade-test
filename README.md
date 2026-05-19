@@ -68,7 +68,7 @@ mv upgrade-ubuntu-latest-amd64 upgrade && chmod +x upgrade
         """
         url: http://test-gitlab-upgrade.example.com
         username: root
-        password: 07Apples@
+        password: redacted-password
         timeout: 15m
         importProjectPath: ./testdata/resources/test-upgrade-repo_export.tar.gz
         """
@@ -89,6 +89,18 @@ operatorConfig:
   workspace: /app/testing/ # test case 执行位置
   namespace: gitlab-ce-operator # operator 部署 ns
   name: gitlab-ce-operator # operator 名称
+  violet: # 必填：上架走外部 violet 二进制
+    packagePrefix: http://package-minio.alauda.cn:9199/packages/ # 必填，无默认值
+    platformAddress: https://my-acp.example.com  # 必填：ACP 平台 URL
+    clusters: devops                              # 写入的目标子集群名；默认 "global"，多集群部署必填
+    # bin: /usr/local/bin/violet  # 可选；为空则在 $PATH 查 `violet`
+    # skipPush: true              # 默认 true；私有 registry 场景置 false
+    # pushArgs:                   # 私有场景透传给 `violet push` 的额外非凭证参数
+    #   - --dest-repo             # 凭证 (--username/--password/--platform-username/--platform-password)
+    #   - registry.private/devops # 必须走环境变量，pushArgs 写入会被 CLI 拒绝
+    #   - --plain
+    #   - --image-pull-secret
+    #   - private-pull
 upgradePaths: # 定义升级路径，可以包含多个
   - name: v17.8 upgrade to v17.11 # 升级名称
     versions: # 定义升级路经
@@ -96,13 +108,22 @@ upgradePaths: # 定义升级路径，可以包含多个
         testCommand: |
           TAGS=@prepare-17.8 GODOG_ARGS="--godog.format=allure" make test
         bundleVersion: v17.8.10
-        channel: stable
+        channel: stable          # OLM Subscription.spec.channel
+        # packageChannel: v17    # MinIO URL 段；与 OLM channel 不同时填，省略则 fallback 到 channel
+        # expectedSha256: a3f... # 可选；非空时强制校验下载的 .tgz
       - name: v17.11 # 版本名称
         testCommand: |
           TAGS=@upgrade-17.11 GODOG_ARGS="--godog.format=allure --bdd.cleanup=false" make test
         bundleVersion: v17.11.1
         channel: stable
 ```
+
+**配置说明**：
+
+- **`operatorConfig.violet` 必填**。upgrade CLI 不再在 Go 代码里直接创建 `Artifact`/`ArtifactVersion` CR，而是把这步外包给 `violet` 二进制。`operatorConfig.violet` 为空时 `InstallArtifactVersion` 会立即返回配置错误。
+- **`packagePrefix` 没有默认值**。MinIO 根地址跨环境（私有 / 共享 / 区域镜像）不同，CLI 拒绝硬编码任何值。
+- **`.tgz` URL 拼接约定**：`<prefix>/<name>/<packageChannel>/<name>.latest.ALL.<bundleVersion>.tgz`。`packageChannel` 是 MinIO 仓库的路径段（如 `v4.0` / `v4.6` / `rc`），**与 OLM Subscription 的 `channel`（如 `stable` / `pipelines-4.0`）不是同一个概念**。当两者字面相同时（少数情况）可只填 `channel`，CLI 会自动 fallback；当两者不同（tektoncd 这类）必须显式填 `packageChannel`。
+- **`expectedSha256` 强烈建议为外网下载场景填上**。HTTP 明文 + DNS 投毒可能注入恶意 tgz，违 violet 会带集群凭证把恶意 bundle 上架——内网 MinIO 也建议加防。
 
 ### 构建测试镜像
 
@@ -149,3 +170,44 @@ CMD ["--godog.concurrency=2", "--godog.format=allure", "--godog.tags=@prepare-17
 export KUBECONFIG=<kubeconfig.yaml>
 ./upgrade --config upgrade.yaml
 ```
+
+## violet 依赖与运行环境
+
+upgrade CLI 把 `Artifact` / `ArtifactVersion` CR 的创建步骤外包给 `violet` 二进制，因此运行环境必须满足以下条件。
+
+### 二进制依赖
+
+- 运行环境 `$PATH` 上需要有可执行的 `violet`，或者通过 `operatorConfig.violet.bin` 指定绝对路径。Bin 非空时 CLI 会做 `filepath.IsAbs` + `os.Stat` + 可执行位校验，不接受相对路径或非可执行文件。
+- 流水线场景：确保 Tekton task 镜像里预装 violet，或在 task 启动 script 里下载安装。本地开发：参考仓库内 `download-violet` skill 或自行从 cloud.alauda.cn 下载。
+- 当前实现不做 `violet --version` preflight 检查，依赖 OS "command not found" 错误兜底。
+
+### 子进程环境变量 allowlist
+
+upgrade CLI 调用 violet 时**只透传**以下宿主环境变量：`KUBECONFIG`、`PATH`、`HOME`、`USER`、`VIOLET_*` 前缀。CI runner 上其他 secret（`GITHUB_TOKEN` / `AWS_*` / 等）不会进入 violet 子进程，符合最小权限原则。
+
+### 凭证（两套环境变量）
+
+`violet push` 涉及两类凭证，**都不写进 config.yaml**，改用环境变量：
+
+| 用途 | 环境变量 | 注入的 violet 参数 | 何时需要 |
+|------|----------|-------------------|----------|
+| 登录 ACP 平台创建 Artifact/AV CR | `VIOLET_PLATFORM_USERNAME` / `VIOLET_PLATFORM_PASSWORD` | `--platform-username` / `--platform-password` | **真实集群必填**（violet 拒绝无凭证启动） |
+| 推送镜像到私有 registry | `VIOLET_REGISTRY_USERNAME` / `VIOLET_REGISTRY_PASSWORD` | `--username` / `--password` | 仅 `skipPush: false` 私有场景 |
+
+```sh
+export VIOLET_PLATFORM_USERNAME=admin@example.invalid
+export VIOLET_PLATFORM_PASSWORD=<password>
+# 仅私有 push 场景需要的额外两行:
+# export VIOLET_REGISTRY_USERNAME=<user>
+# export VIOLET_REGISTRY_PASSWORD=<password>
+
+./upgrade --config upgrade.yaml
+```
+
+upgrade CLI 检测到非空时自动追加到 `violet push` 的 argv，日志渲染时把 `--password` 和 `--platform-password` 之后的值替换成 `***`。
+
+⚠️ **共享 CI runner 安全警告**：当前 violet 不支持 stdin / 文件方式读凭证，`--password` 只能进 argv。OS 级 `ps auxe` / `/proc/<pid>/cmdline` / `strace` 都能看到明文密码。**多租户共享 runner 上禁用 `skipPush: false`**，私有 push 场景务必使用独占的 pipeline runner / 独占的 OS 用户账号。
+
+### k8s 凭证
+
+violet 通过 `KUBECONFIG` 连集群（与 upgrade CLI 自身共享同一份）。流水线场景在调 upgrade 前先 `export KUBECONFIG=...` 即可，CLI 透传给子进程不需要额外配置。

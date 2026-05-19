@@ -5,94 +5,161 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/oliveagle/jsonpath"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 	"knative.dev/pkg/logging"
 )
 
+// InstallSubscription drives an OLM in-place upgrade for one target CSV.
+//
+// First version on a fresh cluster: Subscription does not yet exist → create
+// it (installPlanApproval: Manual, startingCSV: csv).
+//
+// Subsequent versions: Subscription already exists from the previous step.
+// The new bundle has just been pushed to the platform catalog by violet, so
+// OLM will produce a fresh InstallPlan whose spec.clusterServiceVersionNames
+// targets the new csv. We do NOT delete the Subscription or the prior CSV —
+// OLM's replace chain rolls them forward, and tearing them down here loses
+// the upgrade-path semantics we want to exercise. We only:
+//
+//  1. patch spec.channel when the target channel differs from the current one
+//     (no-op when it matches);
+//  2. wait for the InstallPlan whose spec targets the new csv;
+//  3. approve it (idempotent — already-approved plans are left alone);
+//  4. wait for the new CSV phase=Succeeded.
 func (o *Operator) InstallSubscription(ctx context.Context, csv string, channel string) error {
 	if csv == "" {
 		return fmt.Errorf("csv is empty")
 	}
 
 	log := logging.FromContext(ctx)
-	log.Infow("installing subscription", "csv", csv, "namespace", o.namespace)
-	// Delete the subscription and csv if they exist
-	if err := o.deleteResource(ctx, subscriptionGVR, o.name, o.namespace); err != nil {
-		return fmt.Errorf("failed to delete old subscription: %v", err)
+	log.Infow("ensuring subscription for upgrade", "csv", csv, "channel", channel, "namespace", o.namespace)
+
+	_, err := o.client.Resource(subscriptionGVR).Namespace(o.namespace).Get(ctx, o.name, metav1.GetOptions{})
+	switch {
+	case errors.IsNotFound(err):
+		log.Infow("subscription absent, creating fresh", "name", o.name, "csv", csv, "channel", channel)
+		if _, err := o.createSubscription(ctx, o.name, o.namespace, csv, channel); err != nil {
+			return fmt.Errorf("failed to create subscription: %v", err)
+		}
+	case err != nil:
+		return fmt.Errorf("failed to get subscription: %v", err)
+	default:
+		log.Infow("subscription exists, rolling forward in place", "name", o.name)
+		if err := o.refreshSubscriptionForUpgrade(ctx, channel); err != nil {
+			return fmt.Errorf("failed to refresh subscription: %v", err)
+		}
 	}
 
-	if err := o.deleteResource(ctx, csvGVR, csv, o.namespace); err != nil {
-		return fmt.Errorf("failed to delete old csv: %v", err)
-	}
-
-	log.Infow("creating subscription", "name", o.name, "namespace", o.namespace, "csv", csv, "channel", channel)
-	_, err := o.createSubscription(ctx, o.name, o.namespace, csv, channel)
-	if err != nil {
-		return fmt.Errorf("failed to create subscription: %v", err)
-	}
-
-	log.Infow("waiting for install plan", "name", o.name, "namespace", o.namespace)
-	installPlanName, err := o.waitInstallPlan(ctx, o.name, o.namespace)
+	log.Infow("waiting for install plan targeting csv", "csv", csv)
+	installPlanName, err := o.waitInstallPlanForCSV(ctx, o.name, o.namespace, csv)
 	if err != nil {
 		return fmt.Errorf("failed to wait for install plan: %v", err)
 	}
 
-	log.Infow("approving install plan", "name", o.name, "namespace", o.namespace, "installPlanName", installPlanName)
-	installPlan, err := o.client.Resource(installPlanGVR).Namespace(o.namespace).Get(ctx, installPlanName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get install plan: %v", err)
-	}
-
-	installPlan.Object["spec"].(map[string]interface{})["approved"] = true
-	_, err = o.client.Resource(installPlanGVR).Namespace(o.namespace).Update(ctx, installPlan, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to update install plan: %v", err)
+	log.Infow("approving install plan", "installPlan", installPlanName, "csv", csv)
+	if err := o.approveInstallPlan(ctx, installPlanName, o.namespace); err != nil {
+		return fmt.Errorf("failed to approve install plan: %v", err)
 	}
 
 	log.Infow("waiting for csv to be ready", "name", csv, "namespace", o.namespace)
-	err = o.waitCSVReady(ctx, csv, o.namespace)
-	if err != nil {
+	if err := o.waitCSVReady(ctx, csv, o.namespace); err != nil {
 		return fmt.Errorf("failed to wait for csv to be ready: %v", err)
 	}
 
-	log.Infow("subscription installed successfully", "name", o.name, "namespace", o.namespace)
+	log.Infow("subscription rolled forward", "name", o.name, "csv", csv)
 	return nil
 }
 
-func (o *Operator) deleteResource(ctx context.Context, gvr schema.GroupVersionResource, name, namespace string) error {
+// refreshAnnotation is bumped on every in-place upgrade to nudge the OLM
+// Subscription controller to re-reconcile, even when spec.channel does not
+// change. The annotation lives under our own domain so it can never collide
+// with OLM's internal olm.* keys.
+const refreshAnnotation = "upgrade-test.alauda.io/refresh-trigger"
+
+// refreshSubscriptionForUpgrade prepares an already-existing Subscription for
+// the next upgrade step. It does two things in a single Update:
+//
+//  1. If the target channel differs from spec.channel, patch it.
+//  2. Always bump refreshAnnotation to a fresh RFC3339Nano timestamp. This is
+//     a force-refresh nudge: even on same-channel upgrades, mutating the
+//     object's metadata makes the OLM controller re-evaluate the Subscription
+//     against the catalog instead of waiting on its internal resync interval.
+//     Useful when the new CSV has just been pushed by violet and the
+//     PackageManifest cache is stale.
+//
+// We deliberately do NOT delete and recreate the Subscription, restart the
+// catalog-operator, or touch the CatalogSource — annotation bump is the
+// lightest mechanism that still guarantees a reconcile.
+//
+// Get is performed inside RetryOnConflict so that a 409 (OLM controller
+// updated status concurrently) re-reads the latest resourceVersion before
+// retrying the mutation. Without this, a busy OLM made the first upgrade
+// step flaky on tektoncd-operator and similar high-traffic Subscriptions.
+func (o *Operator) refreshSubscriptionForUpgrade(ctx context.Context, channel string) error {
 	log := logging.FromContext(ctx)
 
-	log.Infow("deleting old resource", "gvr", gvr, "name", name, "namespace", namespace)
-	var rsAbled dynamic.ResourceInterface
-	nsEnabled := o.client.Resource(gvr)
-	if namespace != "" {
-		rsAbled = nsEnabled.Namespace(namespace)
-	}
-
-	err := rsAbled.Delete(ctx, name, metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete resource %s: %v", name, err)
-	}
-
-	log.Infow("waiting for resource to be deleted", "name", name, "namespace", namespace)
-	err = wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (done bool, err error) {
-		_, err = rsAbled.Get(ctx, name, metav1.GetOptions{})
-		if errors.IsNotFound(err) {
-			log.Infow("resource not found, deleting resource", "name", name, "namespace", namespace)
-			return true, nil
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		sub, err := o.client.Resource(subscriptionGVR).Namespace(o.namespace).Get(ctx, o.name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get subscription: %w", err)
 		}
-		return false, err
+
+		current, _, _ := unstructured.NestedString(sub.Object, "spec", "channel")
+		if current != channel {
+			log.Infow("patching subscription channel", "from", current, "to", channel)
+			if err := unstructured.SetNestedField(sub.Object, channel, "spec", "channel"); err != nil {
+				return fmt.Errorf("set spec.channel: %w", err)
+			}
+		} else {
+			log.Infow("subscription channel already matches target", "channel", channel)
+		}
+
+		annotations, _, _ := unstructured.NestedStringMap(sub.Object, "metadata", "annotations")
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		stamp := time.Now().UTC().Format(time.RFC3339Nano)
+		annotations[refreshAnnotation] = stamp
+		if err := unstructured.SetNestedStringMap(sub.Object, annotations, "metadata", "annotations"); err != nil {
+			return fmt.Errorf("set refresh annotation: %w", err)
+		}
+		log.Infow("force-refresh annotation bumped to trigger OLM reconcile", "annotation", refreshAnnotation, "value", stamp)
+
+		_, err = o.client.Resource(subscriptionGVR).Namespace(o.namespace).Update(ctx, sub, metav1.UpdateOptions{})
+		return err
 	})
-	if err != nil {
-		return fmt.Errorf("failed to delete resource %s: %v", name, err)
-	}
-	return nil
+}
+
+// approveInstallPlan flips spec.approved=true. Idempotent: if the plan is
+// already approved (e.g. retry after a prior partial run), it returns nil
+// without issuing an Update.
+//
+// Get + Update run inside RetryOnConflict so a concurrent OLM status write
+// does not turn the approval into a hard failure — the upgrade flow has no
+// pre-approved state to roll back to and a single 409 here would otherwise
+// abort the entire upgrade path.
+func (o *Operator) approveInstallPlan(ctx context.Context, name, namespace string) error {
+	log := logging.FromContext(ctx)
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		ip, err := o.client.Resource(installPlanGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get install plan: %w", err)
+		}
+		if approved, _, _ := unstructured.NestedBool(ip.Object, "spec", "approved"); approved {
+			log.Infow("install plan already approved, skipping update", "name", name)
+			return nil
+		}
+		if err := unstructured.SetNestedField(ip.Object, true, "spec", "approved"); err != nil {
+			return fmt.Errorf("set spec.approved: %w", err)
+		}
+		_, err = o.client.Resource(installPlanGVR).Namespace(namespace).Update(ctx, ip, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv string, channel string) (*unstructured.Unstructured, error) {
@@ -160,47 +227,59 @@ func (o *Operator) createSubscription(ctx context.Context, name, namespace, csv 
 	return nil, fmt.Errorf("failed to create subscription after 3 attempts: %v", err)
 }
 
-// waitInstallPlan waits for the subscription to have an install plan and returns the install plan name
-func (o *Operator) waitInstallPlan(ctx context.Context, name, namespace string) (string, error) {
-	var installPlanName string
+// waitInstallPlanForCSV waits until Subscription.status.installplan.name
+// points at an InstallPlan whose spec.clusterServiceVersionNames contains the
+// target CSV, then returns that InstallPlan name.
+//
+// Why the extra CSV check (vs. the old "any installplan name will do"
+// behaviour): on the second+ upgrade step Subscription.status.installplan.name
+// briefly still references the *previous* InstallPlan that we already
+// approved. Returning it would make the caller no-op-approve the old plan and
+// then hang in waitCSVReady waiting for a CSV transition that OLM never
+// produces. Matching on spec.clusterServiceVersionNames is the only way the
+// API tells us which CSV a given InstallPlan targets, so we poll until the
+// referenced plan actually targets the version we just pushed.
+func (o *Operator) waitInstallPlanForCSV(ctx context.Context, subName, namespace, csv string) (string, error) {
+	log := logging.FromContext(ctx)
+	var matched string
 
 	err := wait.PollUntilContextTimeout(ctx, o.interval, o.timeout, true, func(ctx context.Context) (done bool, err error) {
-		obj, err := o.client.Resource(subscriptionGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		sub, err := o.client.Resource(subscriptionGVR).Namespace(namespace).Get(ctx, subName, metav1.GetOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			return false, err
 		}
-
-		if obj == nil {
+		if sub == nil {
 			return false, nil
 		}
 
-		// Use jsonpath to extract status.installplan.name
-		jsonpathQuery := "$.status.installplan.name"
-		result, err := jsonpath.JsonPathLookup(obj.Object, jsonpathQuery)
+		ipName, _, _ := unstructured.NestedString(sub.Object, "status", "installplan", "name")
+		if ipName == "" {
+			return false, nil
+		}
+
+		ip, err := o.client.Resource(installPlanGVR).Namespace(namespace).Get(ctx, ipName, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
 		if err != nil {
-			// Install plan name not found yet, continue waiting
-			return false, nil
+			return false, err
 		}
 
-		// Convert result to string
-		if installPlanNameStr, ok := result.(string); ok && installPlanNameStr != "" {
-			installPlanName = installPlanNameStr
-			return true, nil
+		csvs, _, _ := unstructured.NestedStringSlice(ip.Object, "spec", "clusterServiceVersionNames")
+		for _, name := range csvs {
+			if name == csv {
+				matched = ipName
+				return true, nil
+			}
 		}
-
-		// Install plan name is empty or not a string, continue waiting
+		log.Debugw("install plan does not target desired csv yet", "installPlan", ipName, "wantCSV", csv, "haveCSVs", csvs)
 		return false, nil
 	})
 
 	if err != nil {
-		return "", fmt.Errorf("timeout waiting for subscription %s to have install plan", name)
+		return "", fmt.Errorf("timeout waiting for install plan targeting csv %s on subscription %s: %w", csv, subName, err)
 	}
-
-	if installPlanName == "" {
-		return "", fmt.Errorf("install plan name not found for subscription %s", name)
-	}
-
-	return installPlanName, nil
+	return matched, nil
 }
 
 func (o *Operator) waitCSVReady(ctx context.Context, name, namespace string) error {
