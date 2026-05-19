@@ -18,7 +18,7 @@ origin：`docs/brainstorms/2026-05-18-violet-external-binary-brainstorm.md`。�
 
 ## Problem Statement / Motivation
 
-当前 `pkg/operator/operatorhub/artifact_versiong.go:51-90` 把 `Artifact`/`ArtifactVersion` 的 CRD 字段（apiVersion / labels / annotations / spec.present / spec.tag / OwnerReferences 等）**硬编码**在 Go 里。
+当前 `pkg/operator/operatorhub/artifact_version.go:51-90` 把 `Artifact`/`ArtifactVersion` 的 CRD 字段（apiVersion / labels / annotations / spec.present / spec.tag / OwnerReferences 等）**硬编码**在 Go 里。
 
 问题：
 1. **schema 漂移风险** — Alauda CRD 演进时 upgrade CLI 必须跟着改、重发版
@@ -29,7 +29,7 @@ origin：`docs/brainstorms/2026-05-18-violet-external-binary-brainstorm.md`。�
 
 ## Proposed Solution
 
-**新 `InstallArtifactVersion` 流程**（替换 `pkg/operator/operatorhub/artifact_versiong.go:15-49`）：
+**新 `InstallArtifactVersion` 流程**（替换 `pkg/operator/operatorhub/artifact_version.go:15-49`）：
 
 ```
 1. resolve URL      : 按 <prefix>/<name>/<channel>/<name>.latest.ALL.<bundleVersion>.tgz 拼
@@ -319,7 +319,7 @@ violet 自身打印的 `--password=xxx`（如有 debug 模式）会进 CLI 日�
 - `pkg/operator/operatorhub/violet.go`：
   - 新增 `(o *Operator) installViaViolet(ctx, version Version) (*unstructured.Unstructured, error)`
   - 实现 download HTTP GET → 临时目录 → sha256 校验（若 ExpectedSha256 非空）→ ensure clean AV（Get + Delete + Poll NotFound）→ exec violet（用 PR 1 的 EnvAllowlist）→ 复用 `waitArtifactVersionPresent` / `waitPackageManifest`
-- `pkg/operator/operatorhub/artifact_versiong.go`：
+- `pkg/operator/operatorhub/artifact_version.go`：
   - `InstallArtifactVersion` 改走 `o.installViaViolet`
   - **保留** `createArtifactVersion` 函数为 dead code（不删；便于 PR 2 出问题时本地 diff 对比）
 - `README.md`：新增章节
@@ -356,7 +356,7 @@ violet 自身打印的 `--password=xxx`（如有 debug 模式）会进 CLI 日�
 **Branch**：`chore/remove-deprecated-create-av`（基于 PR 2 分支）
 
 **改动范围**：
-- `pkg/operator/operatorhub/artifact_versiong.go`：
+- `pkg/operator/operatorhub/artifact_version.go`：
   - 删除 `createArtifactVersion` 函数
   - 删除仅它在用的 imports（`metav1` OwnerReference 等若不再需要）
 - 检查 `artifactGVR` 是否还有引用 —— 仍要保留（`InstallArtifactVersion` 的 Get + `installViaViolet` 的 Delete 仍用）
@@ -401,10 +401,10 @@ PR 1 (基础设施) ─┬─→ PR 2 (切换 + dead code 保留) ─→ PR 3 (�
 
 ### Internal references
 
-- 现有 unstructured 创建逻辑：`pkg/operator/operatorhub/artifact_versiong.go:51-90`
+- 现有 unstructured 创建逻辑：`pkg/operator/operatorhub/artifact_version.go:51-90`
 - 子进程 exec：`pkg/exec/exec.go:43-80`（env 透传现状 line 48）
 - 配置默认值入口：`pkg/config/config.go:91-112`
-- knative logging 模式：`pkg/operator/operatorhub/subscription.go:23`、`pkg/operator/operatorhub/artifact_versiong.go:16`
+- knative logging 模式：`pkg/operator/operatorhub/subscription.go:23`、`pkg/operator/operatorhub/artifact_version.go:16`
 - factory：`pkg/operator/factory.go`
 - Tekton Pipeline `devops/upgrade-test`（integration-test 集群）：在线读取于 2026-05-18
 

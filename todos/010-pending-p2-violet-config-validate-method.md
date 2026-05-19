@@ -15,7 +15,7 @@ VioletConfig 的校验目前分布在三个站点：
 - `BuildPackageURL`（violet.go:49-62）—— PackagePrefix / Channel / BundleVersion 空字符串检查
 - `validateVioletBin`（violet.go:340-355）—— Bin 路径形态
 
-`OperatorConfig.Type == "operatorhub"` 且 `Violet == nil` 的非法组合，则要拖到 `InstallArtifactVersion`（artifact_versiong.go:19-21）才报错——用户跑了一半升级才发现 config 没写完。
+`OperatorConfig.Type == "operatorhub"` 且 `Violet == nil` 的非法组合，则要拖到 `InstallArtifactVersion`（artifact_version.go:19-21）才报错——用户跑了一半升级才发现 config 没写完。
 
 # Findings
 
