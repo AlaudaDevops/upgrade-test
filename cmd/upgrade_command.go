@@ -15,7 +15,6 @@ import (
 	"github.com/AlaudaDevops/upgrade-test/pkg/config"
 	"github.com/AlaudaDevops/upgrade-test/pkg/exec"
 	"github.com/AlaudaDevops/upgrade-test/pkg/operator"
-	"github.com/AlaudaDevops/upgrade-test/pkg/operator/preflight"
 	"knative.dev/pkg/logging"
 )
 
@@ -171,15 +170,22 @@ func (uc *UpgradeCommand) Execute() error {
 // when violet.clusters is configured. It is a no-op for configs that do not
 // use violet's multi-cluster path.
 //
-// In-cluster (empty kubeconfig path) cannot read a context name, so the guard
-// degrades to a loud warning rather than refusing to run — a CI pod that lost
-// its KUBECONFIG should not be silently blocked, but its operator should know
-// the cluster identity check was skipped.
+// When violet.clusters is set the user has opted into a multi-cluster ACP
+// topology where wrong-cluster writes are catastrophic, so the guard is
+// strict in EVERY mode:
 //
-// DECISION B (locked at default — B1 / exact equality): the recommended
-// matching rule is exact string equality against KUBECONFIG's CurrentContext.
-// To loosen to substring/regex matching, replace the comparison below; the
-// flag surface (--confirm-cluster) stays unchanged either way.
+//   - File-mode kubeconfig: --confirm-cluster must equal CurrentContext.
+//   - In-cluster (empty kubeconfig path): there is no context name to read,
+//     so --confirm-cluster must equal violet.clusters — the user explicitly
+//     acknowledges the target subcluster.
+//   - Empty CurrentContext in a multi-context kubeconfig is a user
+//     configuration error, not an environmental constraint. We refuse to
+//     run and tell the user to `kubectl config use-context <name>` first.
+//
+// DECISION B (locked at default — B1 / exact equality): the matching rule
+// is exact string equality. To loosen to substring/regex matching, replace
+// the two comparisons below; the flag surface (--confirm-cluster) stays
+// unchanged either way.
 func (uc *UpgradeCommand) assertClusterMatch(cfg *config.Config, kubeconfig string) error {
 	if cfg.OperatorConfig.Violet == nil || cfg.OperatorConfig.Violet.Clusters == "" {
 		return nil
@@ -187,24 +193,42 @@ func (uc *UpgradeCommand) assertClusterMatch(cfg *config.Config, kubeconfig stri
 	violetClusters := cfg.OperatorConfig.Violet.Clusters
 
 	if kubeconfig == "" {
-		uc.logger.Warn(
-			"violet.clusters is set but running in-cluster (no KUBECONFIG file); cluster identity NOT verified",
-			zap.String("violet.clusters", violetClusters),
-		)
+		// In-cluster mode: no CurrentContext to read. Require the user to
+		// explicitly acknowledge the target subcluster via --confirm-cluster
+		// matching violet.clusters. Without this guard a CI pod silently
+		// writes to whatever cluster its serviceaccount is bound to.
+		if uc.confirmCluster == "" {
+			return fmt.Errorf(
+				"violet.clusters=%q is set but running in-cluster (no KUBECONFIG file); "+
+					"--confirm-cluster=%q is required to acknowledge the target subcluster",
+				violetClusters, violetClusters,
+			)
+		}
+		if uc.confirmCluster != violetClusters {
+			return fmt.Errorf(
+				"--confirm-cluster=%q does not match violet.clusters=%q; "+
+					"in-cluster mode requires the two to be identical",
+				uc.confirmCluster, violetClusters,
+			)
+		}
 		return nil
 	}
+
 	apiCfg, err := clientcmd.LoadFromFile(kubeconfig)
 	if err != nil {
 		return fmt.Errorf("read kubeconfig %s for cluster guard: %v", kubeconfig, err)
 	}
 	currentCtx := apiCfg.CurrentContext
 	if currentCtx == "" {
-		uc.logger.Warn(
-			"violet.clusters is set but kubeconfig has no current-context; cluster identity NOT verified",
-			zap.String("violet.clusters", violetClusters),
-			zap.String("kubeconfig", kubeconfig),
+		// User configuration error: multi-context kubeconfig with no
+		// current-context set. Don't silently fall back — `upgrade` would
+		// otherwise inherit whatever default the client picks. Make the
+		// user pick.
+		return fmt.Errorf(
+			"violet.clusters=%q but kubeconfig %s has no current-context; "+
+				"run `kubectl config use-context <name>` first",
+			violetClusters, kubeconfig,
 		)
-		return nil
 	}
 	if uc.confirmCluster == "" {
 		return fmt.Errorf(
@@ -226,32 +250,17 @@ func (uc *UpgradeCommand) assertClusterMatch(cfg *config.Config, kubeconfig stri
 // reporting a non-empty residual list stops the run with a *PreflightError
 // — failing fast spares the user a multi-path megareport when the first
 // dirty cluster already tells them what to clean.
-//
-// `seen` deduplicates residuals across paths using (Kind, Namespace, Name);
-// it is harmless when fail-fast triggers on the first path but pays off
-// if the loop is ever changed to aggregate across paths.
 func (uc *UpgradeCommand) runPreflight(ctx context.Context) error {
-	seen := map[string]struct{}{}
 	for _, path := range uc.config.UpgradePaths {
 		if len(path.Versions) == 0 {
 			continue
 		}
-		baseline := path.Versions[0]
-		residuals, err := uc.operator.PreflightBaseline(ctx, baseline)
+		residuals, err := uc.operator.PreflightBaseline(ctx, path.Versions[0])
 		if err != nil {
 			return err
 		}
-		var unique []preflight.Residual
-		for _, r := range residuals {
-			key := r.Kind + "|" + r.Namespace + "|" + r.Name
-			if _, dup := seen[key]; dup {
-				continue
-			}
-			seen[key] = struct{}{}
-			unique = append(unique, r)
-		}
-		if len(unique) > 0 {
-			return &PreflightError{Residuals: unique}
+		if len(residuals) > 0 {
+			return &PreflightError{Residuals: residuals}
 		}
 	}
 	return nil

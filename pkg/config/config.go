@@ -239,11 +239,18 @@ func validateConfig(cfg *Config) error {
 				if v.Channel == "" {
 					return fmt.Errorf("upgradePaths[%d].versions[%d] (%q): channel is required for operatorhub type", i, j, v.Name)
 				}
-				// bundleVersion gets interpolated into shell commands (preflight
-				// cleanup hints) and into violet argv. Rejecting shell-active
-				// characters here is a single chokepoint that closes the
-				// injection vector for every downstream consumer.
-				if v.BundleVersion != "" && !bundleVersionRegex.MatchString(v.BundleVersion) {
+				// bundleVersion is load-bearing for operatorhub: it feeds the
+				// AV name (<artifact>.<bundleVersion>), the violet push tgz
+				// URL, and the kubectl cleanup hints emitted by preflight.
+				// Empty values silently produce malformed downstream names
+				// ("operatorhub-foo." with trailing dot), so preflight would
+				// report clean while upgrade fails late with cryptic errors.
+				// Require non-empty here, then regex-validate to close the
+				// shell-injection vector for every downstream consumer.
+				if v.BundleVersion == "" {
+					return fmt.Errorf("upgradePaths[%d].versions[%d] (%q): bundleVersion is required for operatorhub type", i, j, v.Name)
+				}
+				if !bundleVersionRegex.MatchString(v.BundleVersion) {
 					return fmt.Errorf("upgradePaths[%d].versions[%d] (%q): bundleVersion %q must match %s", i, j, v.Name, v.BundleVersion, bundleVersionRegex.String())
 				}
 			}

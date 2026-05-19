@@ -82,12 +82,9 @@ func (o *Operator) checkSubscriptionResidue(ctx context.Context, _ config.Versio
 	case err != nil:
 		return nil, err
 	}
-	return []preflight.Residual{{
-		Kind:               "Subscription",
-		Namespace:          o.namespace,
-		Name:               sub.GetName(),
-		RecommendedCleanup: fmt.Sprintf("kubectl delete subscription %q -n %q", sub.GetName(), o.namespace),
-	}}, nil
+	return []preflight.Residual{
+		preflight.NewResidual("Subscription", o.namespace, sub.GetName()),
+	}, nil
 }
 
 // checkArtifactVersionResidue Gets the AV named <artifact>.<bundleVersion> in
@@ -103,12 +100,9 @@ func (o *Operator) checkArtifactVersionResidue(ctx context.Context, version conf
 	case err != nil:
 		return nil, err
 	}
-	return []preflight.Residual{{
-		Kind:               "ArtifactVersion",
-		Namespace:          systemNamespace,
-		Name:               av.GetName(),
-		RecommendedCleanup: fmt.Sprintf("kubectl delete artifactversion %q -n %q", av.GetName(), systemNamespace),
-	}}, nil
+	return []preflight.Residual{
+		preflight.NewResidual("ArtifactVersion", systemNamespace, av.GetName()),
+	}, nil
 }
 
 // checkInstallPlanResidue Lists InstallPlans in the operator namespace using
@@ -126,18 +120,28 @@ func (o *Operator) checkInstallPlanResidue(ctx context.Context, _ config.Version
 		return nil, err
 	}
 
+	log := logging.FromContext(ctx)
 	var residuals []preflight.Residual
 	for _, ip := range ips.Items {
-		phase, _, _ := unstructured.NestedString(ip.Object, "status", "phase")
+		phase, found, perr := unstructured.NestedString(ip.Object, "status", "phase")
+		if perr != nil {
+			// Type drift: status.phase is no longer a string. Surface loudly
+			// rather than silently treating it as non-terminal and reporting
+			// every IP in the namespace as residue. Catches OLM CRD schema
+			// migrations early instead of producing a noise storm.
+			return nil, fmt.Errorf("InstallPlan %s/%s: unexpected status.phase type: %w",
+				ip.GetNamespace(), ip.GetName(), perr)
+		}
+		if !found {
+			// IP exists but has not been reconciled yet (no status.phase
+			// written). Treat as live — it is by definition non-terminal —
+			// but log so an unexpected flood of these is observable.
+			log.Infow("InstallPlan has no status.phase yet, treating as live", "name", ip.GetName())
+		}
 		if _, terminal := installPlanTerminalPhases[phase]; terminal {
 			continue
 		}
-		residuals = append(residuals, preflight.Residual{
-			Kind:               "InstallPlan",
-			Namespace:          o.namespace,
-			Name:               ip.GetName(),
-			RecommendedCleanup: fmt.Sprintf("kubectl delete installplan %q -n %q", ip.GetName(), o.namespace),
-		})
+		residuals = append(residuals, preflight.NewResidual("InstallPlan", o.namespace, ip.GetName()))
 	}
 	return residuals, nil
 }
