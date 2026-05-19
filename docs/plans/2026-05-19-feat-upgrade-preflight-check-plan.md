@@ -1,7 +1,7 @@
 ---
 title: upgrade CLI 前置检查 (preflight check)
 type: feat
-status: active
+status: completed
 date: 2026-05-19
 deepened_on: 2026-05-19
 ---
