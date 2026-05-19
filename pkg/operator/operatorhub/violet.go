@@ -245,11 +245,6 @@ func (o *Operator) installViaViolet(ctx context.Context, version config.Version)
 	log.Infow("installing artifact version via violet",
 		"bundleVersion", version.BundleVersion, "channel", version.Channel)
 
-	artifact, err := o.GetResource(ctx, o.artifact, systemNamespace, artifactGVR)
-	if err != nil {
-		return nil, "", fmt.Errorf("get artifact %s: %w", o.artifact, err)
-	}
-
 	url, err := BuildPackageURL(o.violet.PackagePrefix, o.name, version.EffectivePackageChannel(), version.Channel, version.BundleVersion)
 	if err != nil {
 		return nil, "", fmt.Errorf("build package url: %w", err)
@@ -265,7 +260,7 @@ func (o *Operator) installViaViolet(ctx context.Context, version config.Version)
 		return nil, "", fmt.Errorf("verify sha256: %w", err)
 	}
 
-	avName := fmt.Sprintf("%s.%s", artifact.GetName(), version.BundleVersion)
+	avName := fmt.Sprintf("%s.%s", o.artifact, version.BundleVersion)
 	if err := o.deleteArtifactVersionIfExists(ctx, avName); err != nil {
 		return nil, "", fmt.Errorf("ensure clean AV %s: %w", avName, err)
 	}
