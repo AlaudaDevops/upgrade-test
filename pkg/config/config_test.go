@@ -80,10 +80,14 @@ upgradePaths:
 // failure mode: if validateConfig ran *before* defaultConfig, a config with
 // no explicit type would skip channel validation, then crash at runtime when
 // operatorhub kicked in. This test pins the ordering down.
+//
+// The fixture sets namespace explicitly so the newer namespace-required check
+// does not short-circuit before channel validation gets to run.
 func TestLoadConfig_AppliesOperatorhubDefaultWhenTypeOmitted(t *testing.T) {
 	yaml := `
 operatorConfig:
   name: tektoncd-operator
+  namespace: tektoncd-pipelines
 upgradePaths:
   - name: main
     versions:
@@ -125,5 +129,107 @@ upgradePaths:
 	}
 	if got := len(cfg.UpgradePaths[0].Versions); got != 2 {
 		t.Errorf("Versions length = %d, want 2", got)
+	}
+}
+
+// TestLoadConfig_RejectsMissingNamespaceForOperatorhub: preflight reads
+// Subscription / InstallPlan from the configured namespace; an empty value
+// would silently degrade to cluster-scope queries and produce false-positive
+// residue reports. Catch at load time.
+func TestLoadConfig_RejectsMissingNamespaceForOperatorhub(t *testing.T) {
+	yaml := `
+operatorConfig:
+  type: operatorhub
+  name: tektoncd-operator
+upgradePaths:
+  - name: main
+    versions:
+      - name: first
+        bundleVersion: 4.0.17
+        channel: stable
+`
+	_, err := LoadConfig(writeTempYAML(t, yaml))
+	if err == nil {
+		t.Fatal("operatorhub type without namespace must be rejected at load time")
+	}
+	if !strings.Contains(err.Error(), "namespace is required") {
+		t.Errorf("error should explain the namespace requirement, got: %v", err)
+	}
+}
+
+// TestLoadConfig_AllowsMissingNamespaceForLocal mirrors the channel-required
+// gating: local mode runs `make deploy` and has no OLM namespace concept.
+func TestLoadConfig_AllowsMissingNamespaceForLocal(t *testing.T) {
+	yaml := `
+operatorConfig:
+  type: local
+  name: tektoncd-operator
+upgradePaths:
+  - name: main
+    versions:
+      - name: first
+        bundleVersion: 4.0.17
+`
+	if _, err := LoadConfig(writeTempYAML(t, yaml)); err != nil {
+		t.Fatalf("local type should not require namespace: %v", err)
+	}
+}
+
+// TestLoadConfig_RejectsShellMetaCharacterInBundleVersion: BundleVersion is
+// interpolated into kubectl cleanup hints and violet argv; allowing $, `, or
+// quotes here would propagate to user shells. The single chokepoint test
+// guards every downstream consumer.
+func TestLoadConfig_RejectsShellMetaCharacterInBundleVersion(t *testing.T) {
+	// Single-quoted YAML scalars accept embedded double quotes verbatim, so
+	// these test cases reach validateConfig instead of being rejected by the
+	// YAML parser one layer earlier.
+	cases := []string{`1.0$(whoami)`, "1.0;ls", "1.0 spaces", "1.0`backtick`", `1.0"quote`}
+	for _, bv := range cases {
+		t.Run(bv, func(t *testing.T) {
+			yaml := `
+operatorConfig:
+  type: operatorhub
+  name: tektoncd-operator
+  namespace: tektoncd-pipelines
+upgradePaths:
+  - name: main
+    versions:
+      - name: first
+        bundleVersion: '` + bv + `'
+        channel: stable
+`
+			_, err := LoadConfig(writeTempYAML(t, yaml))
+			if err == nil {
+				t.Fatalf("bundleVersion %q must be rejected", bv)
+			}
+			if !strings.Contains(err.Error(), "bundleVersion") {
+				t.Errorf("error should name the field, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_AcceptsRealisticBundleVersions verifies the regex is not
+// over-tight against versions observed in production configs.
+func TestLoadConfig_AcceptsRealisticBundleVersions(t *testing.T) {
+	cases := []string{"v4.6.3", "4.6.3-rc.91", "v0.74.0", "4.0.17"}
+	for _, bv := range cases {
+		t.Run(bv, func(t *testing.T) {
+			yaml := `
+operatorConfig:
+  type: operatorhub
+  name: tektoncd-operator
+  namespace: tektoncd-pipelines
+upgradePaths:
+  - name: main
+    versions:
+      - name: first
+        bundleVersion: ` + bv + `
+        channel: stable
+`
+			if _, err := LoadConfig(writeTempYAML(t, yaml)); err != nil {
+				t.Fatalf("bundleVersion %q should be accepted: %v", bv, err)
+			}
+		})
 	}
 }
