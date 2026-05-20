@@ -171,6 +171,58 @@ export KUBECONFIG=<kubeconfig.yaml>
 ./upgrade --config upgrade.yaml
 ```
 
+## 前置检查 (preflight)
+
+进入升级循环前，upgrade CLI 会对**每条升级路径的起点版本（`versions[0]`）**做一次**只读**扫描，发现下列任一残留就立即停止：
+
+| 检查项 | 资源 | 命名空间 |
+|--------|------|----------|
+| Subscription 残留 | `subscriptions.operators.coreos.com/<name>` | `operatorConfig.namespace` |
+| ArtifactVersion 残留 | `artifactversions.app.alauda.io/<artifact>.<bundleVersion>` | `cpaas-system` |
+| 未结束的 InstallPlan | `installplans.operators.coreos.com`（用 OLM label `operators.coreos.com/<package>.<ns>` 精确过滤），`status.phase` 非 `Complete` / `Failed` | `operatorConfig.namespace` |
+
+preflight 设有 **30s 总超时**，超时直接报错避免阻塞升级。任何残留 → 输出每个对象的 `kubectl delete` 命令模板（已用 `%q` 转义、可直接复制粘贴），并附带 finalizer 卡死的兜底指令和"等 OLM settle 30s"提示。
+
+**典型错误信息**：
+
+```
+preflight failed: 1 residual resource(s) blocking upgrade:
+
+  Subscription/tektoncd-operator (ns: tektoncd-pipelines)
+      kubectl delete subscription "tektoncd-operator" -n "tektoncd-pipelines"
+
+If a delete hangs (finalizer stuck), patch finalizers off:
+  kubectl -n <ns> patch <kind> <name> --type=merge -p '{"metadata":{"finalizers":[]}}'
+
+After cleanup, wait ~30s for OLM to settle, then re-run `upgrade`.
+To bypass (NOT recommended): re-run with --skip-preflight
+```
+
+### preflight 相关 flag
+
+| Flag | 何时用 | 行为 |
+|------|--------|------|
+| `--skip-preflight` | 已知环境脏但要测某个边界 case；CI 应急 | 跳过整段检查，仅 `WARN` 一行 audit；其余流程不变 |
+| `--confirm-cluster=<NAME>` | `operatorConfig.violet.clusters` **非空**时**必填** | `<NAME>` 必须等于 KUBECONFIG 当前 context 名；不匹配直接报错，防止误把生产 KUBECONFIG 当 sprint env 跑（"silent 假成功"的对称防御） |
+
+in-cluster 运行（pod 内，无 kubeconfig 文件）会自动降级为 `WARN` 提示而不是硬 fail。
+
+### 最小 RBAC
+
+只跑 preflight 需要的 verbs（不含升级本身需要的写权限）：
+
+```yaml
+rules:
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["subscriptions", "installplans"]
+    verbs: ["get", "list"]
+  - apiGroups: ["app.alauda.io"]
+    resources: ["artifactversions"]
+    verbs: ["get"]
+```
+
+升级本身需要的写权限不在此列。
+
 ## violet 依赖与运行环境
 
 upgrade CLI 把 `Artifact` / `ArtifactVersion` CR 的创建步骤外包给 `violet` 二进制，因此运行环境必须满足以下条件。

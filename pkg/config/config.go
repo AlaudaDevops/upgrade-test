@@ -5,10 +5,20 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"gopkg.in/yaml.v2"
 )
+
+// bundleVersionRegex bounds what may appear in Version.BundleVersion. The
+// field is interpolated into shell command templates (kubectl cleanup hints
+// emitted by preflight) and into violet argv, so anything beyond
+// [a-zA-Z0-9._-] risks shell metacharacter injection at the user's terminal.
+// The chosen set covers every real bundle version observed in practice
+// (`v4.6.3`, `4.6.3-rc.91`, `v0.74.0`) while leaving no room for `$`, backticks,
+// quotes, spaces, or `;`.
+var bundleVersionRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 const (
 	defaultOperatorNamespace = "testing-upgrade-namespace"
@@ -216,10 +226,32 @@ func validateConfig(cfg *Config) error {
 	// the requirement is gated on Type to avoid forcing irrelevant fields on
 	// local-dev configs.
 	if cfg.OperatorConfig.Type == "operatorhub" {
+		// Namespace is required: preflight's Get / List against Subscription /
+		// InstallPlan would otherwise target an empty namespace, which dynamic
+		// client treats as cluster-scope — leading to false-positive residue
+		// reports from completely unrelated operators in other namespaces.
+		// Catching at load time is cheaper than discovering mid-run.
+		if cfg.OperatorConfig.Namespace == "" {
+			return fmt.Errorf("operatorConfig.namespace is required for operatorhub type")
+		}
 		for i, path := range cfg.UpgradePaths {
 			for j, v := range path.Versions {
 				if v.Channel == "" {
 					return fmt.Errorf("upgradePaths[%d].versions[%d] (%q): channel is required for operatorhub type", i, j, v.Name)
+				}
+				// bundleVersion is load-bearing for operatorhub: it feeds the
+				// AV name (<artifact>.<bundleVersion>), the violet push tgz
+				// URL, and the kubectl cleanup hints emitted by preflight.
+				// Empty values silently produce malformed downstream names
+				// ("operatorhub-foo." with trailing dot), so preflight would
+				// report clean while upgrade fails late with cryptic errors.
+				// Require non-empty here, then regex-validate to close the
+				// shell-injection vector for every downstream consumer.
+				if v.BundleVersion == "" {
+					return fmt.Errorf("upgradePaths[%d].versions[%d] (%q): bundleVersion is required for operatorhub type", i, j, v.Name)
+				}
+				if !bundleVersionRegex.MatchString(v.BundleVersion) {
+					return fmt.Errorf("upgradePaths[%d].versions[%d] (%q): bundleVersion %q must match %s", i, j, v.Name, v.BundleVersion, bundleVersionRegex.String())
 				}
 			}
 		}
